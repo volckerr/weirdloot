@@ -765,12 +765,7 @@ end
 local function BossBanner_AnimKillHold() end
 
 local function BossBanner_AnimSwitch(self, entry)
-    if next(self.pendingLoot) then
-        self.AnimSwitch:Play()
-        entry.duration = 0.5
-    else
-        entry.duration = 0
-    end
+    entry.duration = 0   -- medallion is already the loot bag; no skull->bag crossfade needed
 end
 
 local function BossBanner_AnimLootExpand(self, entry)
@@ -1004,8 +999,10 @@ local function BossBanner_AnimBannerOut(self)
 end
 
 local BB_ANIMATION_CONTROL = {
-    [BB_STATE_BANNER_IN]   = { duration = 1.85, onStartFunc = BossBanner_AnimBannerIn },
-    [BB_STATE_KILL_HOLD]   = { duration = 2,    onStartFunc = BossBanner_AnimKillHold },
+    -- The unfurl/lightning animation groups run independently, so we hand off to the rows early (0.6s,
+    -- once the panel + medallion are formed) and let the flourish finish behind the first item.
+    [BB_STATE_BANNER_IN]   = { duration = 0.6,  onStartFunc = BossBanner_AnimBannerIn },
+    [BB_STATE_KILL_HOLD]   = { duration = 0,    onStartFunc = BossBanner_AnimKillHold },
     [BB_STATE_SWITCH]      = { duration = nil,  onStartFunc = BossBanner_AnimSwitch },
     [BB_STATE_LOOT_EXPAND] = { duration = nil,  onStartFunc = BossBanner_AnimLootExpand },
     [BB_STATE_LOOT_INSERT] = { duration = nil,  onStartFunc = BossBanner_AnimLootInsert },
@@ -1081,12 +1078,13 @@ local function BossBanner_Play(self, data)
     if data then
         fixTranslationAnim()
         if data.mode == "KILL" then
-            self.Title:SetAlpha(1)
-            self.SubTitle:SetAlpha(1)
-            self.Title:SetText(data.name or "")
-            self.SubTitle:SetText(data.subtitle or "")
-            self.SubTitle:Show()
-            self.Title:Show()
+            -- Loot intro: keep the eye-catching unfurl + lightning, but show the loot bag right away
+            -- with no skull and no "Loot Awarded" hold. SkullCircle is the medallion the intro animates
+            -- in, so point it at the loot-bag art and leave the separate LootCircle hidden.
+            SetAtlas(self.SkullCircle, "LootBanner-LootBagCircle", true)
+            self.LootCircle:SetAlpha(0)
+            self.Title:Hide()
+            self.SubTitle:Hide()
             self:Show()
             BossBanner_BeginAnims(self)
         elseif data.mode == "LOOT" then
