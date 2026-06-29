@@ -48,6 +48,7 @@ Trade\Payout.lua
 
 UI\UI.lua
 UI\Common.lua
+UI\LootBanner.lua
 UI\Popups.lua
 UI\Export.lua
 UI\Minimap.lua

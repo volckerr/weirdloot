@@ -390,6 +390,12 @@ function self.makeWorld(playerName, isML)
     end
     local addon = env.WeirdLoot
     addon.InitializeUI = function() end       -- UI not loaded in the harness
+    -- LootBanner.lua (the win display) is excluded from the harness: it builds animation frames at
+    -- load time that the lightweight CreateFrame stub does not model. Stub the entry points the
+    -- resolve path calls, recording items so resolution tests can assert the banner payload.
+    addon._bannerItems = {}
+    addon.AddLootBannerItem = function(_, item) addon._bannerItems[#addon._bannerItems + 1] = item end
+    addon.ShowLootBanner = function() end
     addon:PLAYER_LOGIN()
     if os.getenv("WLDEBUG") then env.WeirdLootDB.payoutDebug = true end
     local shippedDefaults = {

@@ -1002,10 +1002,11 @@ test("hide-unusable-rolls option suppresses class-unusable popups for non-ML onl
     eq(ml.addon:ShouldSuppressRollPopup({ itemId = 97001, name = "Wand" }), false, "ML never has popups suppressed")
 end)
 
-test("roll resolution hands the raider a result popup, not an instant vanish (sync race)", function()
+test("roll resolution shows the raider the win banner and closes the interest popup", function()
     local ml, raider, lot = rollWithRaider(40005)
     local roll = rollFor(raider, lot.id)
     check(roll and roll.popup and roll.popup.mode == "interest", "raider has an open interest popup")
+    ml.addon:SetPlayerResponse(lot.id, "Raidertwo", "ms")   -- a roller, so the resolve yields a winner
     ml.addon:ResolveLiveRoll(lot.id)
     flushWireTo(raider)   -- delivers the RESOLVED sync delta (enqueued first) AND the WIN: the race
     local hasResult, hasInterest = false, false
@@ -1013,8 +1014,22 @@ test("roll resolution hands the raider a result popup, not an instant vanish (sy
         if f.mode == "result" then hasResult = true end
         if f.mode == "interest" then hasInterest = true end
     end
-    check(hasResult, "raider ends with a RESULT popup (resolution handed off, sync did not close it)")
-    check(not hasInterest, "the interest popup was converted, not left or vanished")
+    check(not hasInterest, "the interest popup was closed on resolve, not left or vanished")
+    check(not hasResult, "no result popup: the loot banner replaces it")
+    eq(#raider.addon._bannerItems, 1, "raider got exactly one loot-banner item for the win")
+    check(raider.addon._bannerItems[1].winner ~= nil, "the banner item names the winner")
+end)
+
+test("BannerItemFromResult: the win banner item carries winner, reason, and the full roll list", function()
+    local ml, raider, lot = rollWithRaider(40005)
+    ml.addon:SetPlayerResponse(lot.id, "Alice", "bis")   -- BiS beats MS
+    ml.addon:SetPlayerResponse(lot.id, "Bob", "ms")
+    ml.addon:ResolveLiveRoll(lot.id)
+    eq(#ml.addon._bannerItems, 1, "one banner item for the resolved roll")
+    local item = ml.addon._bannerItems[1]
+    check(item.winner ~= nil, "the banner item names the winner")
+    check(item.why and item.why ~= "", "carries the winning reason (roll/bracket)")
+    eq(item.rolls and #item.rolls, 2, "lists every roller (Alice + Bob), pass excluded")
 end)
 
 test("ML cancel closes the raider's roll popup (the only sync-driven close)", function()
@@ -1068,20 +1083,23 @@ test("two-click dismiss: the ML's own popup never closes on a repeat click", fun
     check(not mlRoll.dismissed, "the ML roll is never marked dismissed")
 end)
 
--- item 22: a dismisser sees the winner on resolve ONLY when showResultAfterHide is opted in.
-test("showResultAfterHide off (default): a dismissed raider gets no result popup on resolve", function()
+-- The win banner shows raid-wide: a dismisser learns the winner via the banner regardless of the old
+-- showResultAfterHide option (which gated the now-removed result popup, and no longer applies).
+test("a dismissed raider still gets the win banner (raid-wide), option off", function()
     local ml, raider, lot = rollWithRaider(40005)
     local roll = rollFor(raider, lot.id)
     raider.addon:ChooseInterest(roll, "pass")
     raider.addon:ChooseInterest(roll, "pass")           -- two-click dismiss
     check(not roll.popup and roll.dismissed, "raider dismissed the popup")
+    ml.addon:SetPlayerResponse(lot.id, "Alice", "ms")   -- another roller wins, so there is a banner
     ml.addon:ResolveLiveRoll(lot.id); flushWireTo(raider)
     local hasResult = false
     for _, f in ipairs(raider.addon.live.active) do if f.mode == "result" then hasResult = true end end
-    check(not hasResult, "option off: no result popup reopens for a dismisser")
+    check(not hasResult, "no result popup is created (the banner replaced it)")
+    eq(#raider.addon._bannerItems, 1, "the win banner shows raid-wide even for a dismisser")
 end)
 
-test("showResultAfterHide on: a dismissed raider gets the winner popup on resolve", function()
+test("showResultAfterHide no longer gates the win banner (shows with the option on too)", function()
     local ml, raider, lot = rollWithRaider(40006)
     raider.addon.db.options = raider.addon.db.options or {}
     raider.addon.db.options.showResultAfterHide = true
@@ -1089,10 +1107,9 @@ test("showResultAfterHide on: a dismissed raider gets the winner popup on resolv
     raider.addon:ChooseInterest(roll, "pass")
     raider.addon:ChooseInterest(roll, "pass")           -- two-click dismiss
     check(not roll.popup and roll.dismissed, "raider dismissed the popup")
+    ml.addon:SetPlayerResponse(lot.id, "Alice", "ms")   -- another roller wins, so there is a banner
     ml.addon:ResolveLiveRoll(lot.id); flushWireTo(raider)
-    local hasResult = false
-    for _, f in ipairs(raider.addon.live.active) do if f.mode == "result" then hasResult = true end end
-    check(hasResult, "option on: a result popup reopens so the dismisser sees the winner")
+    eq(#raider.addon._bannerItems, 1, "banner shows for the dismisser with the option on too")
 end)
 
 test("ineligible class: roll brackets are DISABLED (not just message-guarded)", function()

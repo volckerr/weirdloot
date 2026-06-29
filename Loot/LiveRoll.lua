@@ -1825,9 +1825,10 @@ function addon:ResolveLiveRoll(rollId)
     }, "RAID", nil, "ALERT")
     self:TriggerCallback("RESULTS_UPDATED")
 
-    local slot = roll.popup and roll.popup.slot
     self:CloseInterestPopup(roll)
-    self:ShowResultPopup(roll, winners, sections, slot)
+    if #winners > 0 then
+        self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))
+    end
     self.live.rolls[rollId] = nil   -- live-roll UI done; the core holds the truth
 
     if #winners == 0 then
@@ -1878,6 +1879,47 @@ function addon:SectionsFromResult(record)
         end
     end
     return sections
+end
+
+-- Build a loot-banner item (link/icon/winner/why/full roll list) from a resolved roll, for
+-- addon:AddLootBannerItem. This is the win display that replaces the old result popup. The winner's
+-- "why" is their own roll + bracket; rolls is every responder, class-colored on the row tooltip.
+function addon:BannerItemFromResult(roll, winners, sections)
+    local rolls = {}
+    for _, s in ipairs(sections or {}) do
+        for _, m in ipairs(s.members) do
+            rolls[#rolls + 1] = {
+                name = m.name,
+                class = getPlayerClassName(self, util:NormalizeKey(m.name)),
+                roll = m.roll,
+                section = m.isNamed and "LC Prio" or s.label,
+            }
+        end
+    end
+
+    local winnerName = winners and winners[1]
+    local winnerClass, why
+    if winnerName then
+        local wkey = util:NormalizeKey(winnerName)
+        winnerClass = getPlayerClassName(self, wkey)
+        for _, r in ipairs(rolls) do
+            if util:NormalizeKey(r.name) == wkey then
+                why = r.roll and string.format("roll %s - %s", tostring(r.roll), r.section or "?") or r.section
+                break
+            end
+        end
+    end
+
+    return {
+        key = roll.id,
+        link = roll.link,
+        icon = roll.icon,
+        quantity = roll.quantity,
+        winner = winnerName,
+        winnerClass = winnerClass,
+        why = why,
+        rolls = rolls,
+    }
 end
 
 -- pack sections for WIN: "label~name=roll,name=roll" joined by ";"
@@ -2003,16 +2045,14 @@ function addon:OnWinMessage(fields)
         if w ~= "" then winners[#winners + 1] = w end
     end
 
-    -- Do NOT auto-hide a won item. If the player still has the dialog open, convert it to a
-    -- result popup they must OK to dismiss. If they already dismissed it (passed or two-click
-    -- dismissed), leave it gone -- UNLESS they opted into seeing the final roll after hiding
-    -- (item 22), in which case reopen a result popup so they still learn the winner.
+    -- Raid-wide win display: every raider who receives the WIN gets the loot banner, regardless of
+    -- whether they still had the interest popup open or already dismissed it. Close any lingering
+    -- interest popup first so it does not sit behind the banner.
     if roll.popup then
-        local sections = self:DecodeSections(sectionsText)
-        local slot = roll.popup.slot
         self:CloseInterestPopup(roll)
-        self:ShowResultPopup(roll, winners, sections, slot)
-    elseif roll.dismissed and getOptions().showResultAfterHide then
-        self:ShowResultPopup(roll, winners, self:DecodeSections(sectionsText))
+    end
+    if #winners > 0 then
+        local sections = self:DecodeSections(sectionsText)
+        self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))
     end
 end
