@@ -952,7 +952,7 @@ local function updateRowLifetimes(self, elapsed)
             if f.alive and not f.fading then f.timeLeft = 2 end
         end
     end
-    local anyAlive, removed = false, false
+    local removed, stillCounting = false, 0
     for _, f in ipairs(self.LootFrames) do
         if f.alive then
             if f.fading then
@@ -964,20 +964,23 @@ local function updateRowLifetimes(self, elapsed)
                     removed = true
                 else
                     f:SetAlpha(f.fadeLeft / ROW_FADE_TIME)
-                    anyAlive = true
                 end
             else
                 f.timeLeft = f.timeLeft - elapsed
                 if f.timeLeft <= 0 then
                     f.fading = true
                     f.fadeLeft = ROW_FADE_TIME
+                else
+                    stillCounting = stillCounting + 1
                 end
-                anyAlive = true
             end
         end
     end
     if removed then relayoutAliveRows(self) end
-    if not anyAlive then
+    -- Start the whole-banner fade as soon as no row is still counting down (the final item has just
+    -- begun fading), so the chrome fades with it rather than lingering empty. The parent fade then
+    -- carries the still-fading rows out together.
+    if stillCounting == 0 then
         BossBanner.SetAnimState(self, BB_STATE_BANNER_OUT)
     end
 end
