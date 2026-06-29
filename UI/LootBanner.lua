@@ -904,6 +904,7 @@ end
 -- Add one item as a row with its own lifetime, reusing a freed row frame or growing the pool.
 local function addRow(self, data)
     if aliveRowCount(self) >= BB_MAX_LOOT then return end
+    local additional = aliveRowCount(self) > 0   -- rows already shown => this is not the first item
     local frame
     for _, f in ipairs(self.LootFrames) do
         if not f.alive and not f.fading then frame = f; break end
@@ -917,17 +918,22 @@ local function addRow(self, data)
     frame:Show()
     if frame.Anim then frame.Anim:Play() end
     relayoutAliveRows(self)
-    -- A new drop refreshes every shown row back to a full lifetime (reviving any that were mid-fade or
-    -- collapsing from a hover), so the player gets time to look over everything that just dropped
-    -- instead of losing earlier items. nil setting => effectively never auto-expire.
-    local full = resultHoldSeconds() or 86400
-    for _, f in ipairs(self.LootFrames) do
-        if f.alive then
-            f.timeLeft = full
-            if f.fading then
-                f.fading = false
-                f.fadeLeft = 0
-                f:SetAlpha(1)
+    -- The new row gets the full configured lifetime. Each additional drop also EXTENDS the rows already
+    -- shown by half the configured duration (reviving any that were mid-fade or collapsing from a
+    -- hover), so earlier items linger while the player looks them over without the whole banner
+    -- snapping back to full. A nil setting (auto-close off / ML keep-open) means never auto-expire.
+    local full = resultHoldSeconds()
+    frame.timeLeft = full or 86400
+    if additional and full then
+        for _, f in ipairs(self.LootFrames) do
+            if f.alive and f ~= frame then
+                -- extend by half, capped at the full duration so a row never outlives a fresher one
+                f.timeLeft = math.min(max(f.timeLeft, 0) + full / 2, full)
+                if f.fading then
+                    f.fading = false
+                    f.fadeLeft = 0
+                    f:SetAlpha(1)
+                end
             end
         end
     end
@@ -1164,6 +1170,7 @@ BossBanner:SetScript("OnMouseDown", BossBanner_OnMouseDown)
 -- opts = { title = "...", subtitle = "...", items = { { link=, icon=, quantity=, winner=, winnerClass= }, ... } }
 function addon:ShowLootBanner(opts)
     if not opts then return end
+    if resultHoldSeconds() == 0 then return end   -- duration set to 0: do not show the toast at all
     local items = opts.items or {}
     wipe(BossBanner.pendingLoot)
     wipe(BossBanner.seenKeys)
@@ -1188,6 +1195,7 @@ end
 -- a fresh banner unfurls. item.key (the roll id) dedupes duplicate/echoed wins within one banner cycle.
 function addon:AddLootBannerItem(item)
     if not item or not item.link then return end
+    if resultHoldSeconds() == 0 then return end   -- duration set to 0: do not show the toast at all
     if item.key then
         if BossBanner.seenKeys[item.key] then return end
         BossBanner.seenKeys[item.key] = true
