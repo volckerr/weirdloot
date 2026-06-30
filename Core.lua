@@ -183,7 +183,7 @@ function addon:PLAYER_LOGIN()
             resultPopupAutoCloseSeconds = 10,
             forceKeepResultPopup = true,   -- LM only: finished-loot winner popups stay open for the
                                            -- whole raid, overriding each player's own auto-close setting.
-            rollDuration = 40,
+            rollDuration = 30,
             rollBatchSize = 5,
             autoStartRoll = true,  -- LM only; mutex with db.autoRoll and autoSkipRoll. New loot
                                     -- broadcasts the DROP immediately (NEW -> ROLLING, no popup gate).

@@ -109,13 +109,13 @@ function addon:BuildOptionsTab()
         "TOPLEFT", keepResultCB, "BOTTOMLEFT", 0, -14)
     local rollDurBox = createNumberEditBox(panel, 50)
     rollDurBox:SetPoint("LEFT", rollDurLabel, "RIGHT", 12, 0)
-    rollDurBox:SetText(tostring(opt.rollDuration or 20))
+    rollDurBox:SetText(tostring(opt.rollDuration))
     rollDurBox:SetScript("OnEditFocusLost", function(selfBox)
         local v = tonumber(selfBox:GetText())
         if v and v > 0 then
             getOptions(addon).rollDuration = v
         else
-            selfBox:SetText(tostring(getOptions(addon).rollDuration or 20))
+            selfBox:SetText(tostring(getOptions(addon).rollDuration))
         end
     end)
 

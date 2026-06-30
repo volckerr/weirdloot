@@ -44,7 +44,7 @@ end)
 H.test("per-character defaults are present after login", function()
     local w = H.makeWorld("Char", true)
     -- a couple of representative option + ui defaults moved verbatim from the old account block
-    H.eq(w.addon.db.options.rollDuration, 40, "option default present in per-char DB")
+    H.eq(w.addon.db.options.rollDuration, 30, "option default present in per-char DB")
     H.eq(w.addon.db.ui.selectedTab, "loot", "ui default present in per-char DB")
 end)
 
@@ -57,7 +57,7 @@ H.test("legacy account-wide options/ui are dropped on load (never re-saved to th
     H.eq(w.env.WeirdLootDB.options, nil, "legacy account options dropped")
     H.eq(w.env.WeirdLootDB.ui, nil, "legacy account ui dropped")
     -- and the legacy values did NOT leak into the per-character store (fresh defaults, no migration)
-    H.eq(w.addon.db.options.rollDuration, 40, "per-char option keeps its default, not legacy 99")
+    H.eq(w.addon.db.options.rollDuration, 30, "per-char option keeps its default, not legacy 99")
     H.eq(w.addon.db.options.blacklistText, "", "per-char blacklist is the default, not legacy text")
 end)
 

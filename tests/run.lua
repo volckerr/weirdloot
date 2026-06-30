@@ -52,9 +52,9 @@ test("core self-checks (in-harness)", function()
     check(w.addon.LootCore.RunSelfChecks(false), "all core self-checks pass")
 end)
 
-test("shipped defaults: 40s rolls, 10s winner popup auto-close, auto-start on", function()
+test("shipped defaults: 30s rolls, 10s winner popup auto-close, auto-start on", function()
     local w = makeWorld("Masterlooter", true)
-    eq(w.shippedDefaults.rollDuration, 40, "roll duration default is 40s")
+    eq(w.shippedDefaults.rollDuration, 30, "roll duration default is 30s")
     eq(w.shippedDefaults.resultPopupAutoCloseEnabled, true, "winner popup auto-close is enabled by default")
     eq(w.shippedDefaults.resultPopupAutoCloseSeconds, 10, "winner popup auto-close duration is 10s")
     eq(w.shippedDefaults.autoStartRoll, true, "new loot auto-starts rolls by default")
@@ -577,11 +577,11 @@ test("rejoin mid-roll: raider restores the roll popup with the ML's remaining ti
     startSession(ml)
     setBag(ml, 40005, 1); bagUpdate(ml)
     local lot = openLot(ml, 40005)
-    ml.addon:StartLiveRoll(lot.id)                 -- ML rolls; deadline = now + 40s (default duration)
+    ml.addon:StartLiveRoll(lot.id)                 -- ML rolls; deadline = now + 30s (default duration)
     local mlRoll = ml.addon.live.rolls[lot.id]
     check(mlRoll and mlRoll.deadline, "ML recorded a roll deadline")
 
-    F.advanceClock(6)                              -- 6s elapse on the ML's roll (34s left)
+    F.advanceClock(6)                              -- 6s elapse on the ML's roll (24s left)
     clearWire()
     ml.addon:BroadcastSession()                   -- a freshly-reloaded raider pulls the full snapshot
     flushWireTo(raider)
@@ -590,8 +590,8 @@ test("rejoin mid-roll: raider restores the roll popup with the ML's remaining ti
     check(rr ~= nil, "raider restored a roll record for the rolling lot")
     check(raider.addon:HasOpenRollForLot(lot.id), "raider has an open roll popup")
     local remaining = rr and rr.deadline and (rr.deadline - F.CLOCK) or nil
-    check(remaining ~= nil and remaining >= 33.5 and remaining <= 34.5,
-        "restored countdown reflects the ML's remaining ~34s, not a fresh 40s (got " .. tostring(remaining) .. ")")
+    check(remaining ~= nil and remaining >= 23.5 and remaining <= 24.5,
+        "restored countdown reflects the ML's remaining ~24s, not a fresh 30s (got " .. tostring(remaining) .. ")")
 end)
 
 -- ---- live pick list (RSTATE): raiders see who is rolling, in real time ----
