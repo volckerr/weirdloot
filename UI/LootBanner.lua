@@ -939,7 +939,12 @@ local function buildBanner(bannerName, medallionCfg)
             for _, btn in ipairs(frame.RollButtons) do
                 btn:SetAlpha(1)   -- a reused slot may carry a stale fade alpha from its previous life
                 btn:UnlockHighlight()
-                btn:GetFontString():SetTextColor(1, 0.82, 0)
+                if data.disabled and data.disabled[btn.bracket] then
+                    btn:Disable()   -- standard grayed-out disabled look (no opacity change)
+                else
+                    btn:Enable()
+                    btn:GetFontString():SetTextColor(1, 0.82, 0)
+                end
                 btn:Show()
             end
             local b1 = frame.RollButtons[1]
@@ -1210,6 +1215,7 @@ local function buildBanner(bannerName, medallionCfg)
             itemLink = item.link, texture = item.icon, quantity = item.quantity or 1,
             winner = item.winner, winnerClass = item.winnerClass, why = item.why,
             winners = item.winners, rolls = item.rolls, prompt = item.prompt, rollDuration = item.rollDuration,
+            disabled = item.disabled,   -- set of bracket labels (e.g. {OS=true}) the player can't pick
         }
         if self.animState == BB_STATE_LOOT_INSERT then
             addRow(self, data)
@@ -1415,7 +1421,9 @@ SlashCmdList["WLBANNER"] = function()
     end
 
     -- DROPS banner: a couple of items up for roll (dice medallion).
-    addon:AddRollBannerItem(rollItem())
+    local firstRoll = rollItem()
+    firstRoll.disabled = { MU = true, OS = true, TM = true }   -- preview #1: standard disabled brackets
+    addon:AddRollBannerItem(firstRoll)
     addon:AddRollBannerItem(rollItem())
 
     -- AWARDED banner: a multi-copy win plus a few stragglers (bag medallion).
