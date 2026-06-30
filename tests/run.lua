@@ -1030,6 +1030,27 @@ test("BannerItemFromResult: the win banner item carries winner, reason, and the 
     check(item.winner ~= nil, "the banner item names the winner")
     check(item.why and item.why ~= "", "carries the winning reason (roll/bracket)")
     eq(item.rolls and #item.rolls, 2, "lists every roller (Alice + Bob), pass excluded")
+    check(item.winners and #item.winners >= 1, "winners list is populated")
+    eq(item.winners[1].name, item.winner, "winners[1] matches the headline winner")
+end)
+
+test("BannerItemFromResult: a multi-copy item lists every winner, bracket-sorted", function()
+    local ml = makeWorld("Masterlooter", true)
+    local roll = { id = "lot1", link = "[Token]", icon = "icon", quantity = 2 }
+    -- Two copies, awarded to a BiS roller then an MS roller; sections come pre-grouped by bracket.
+    local winners = { "Alice", "Bob" }
+    local sections = {
+        { label = "BiS", members = { { name = "Alice", roll = 80 } } },
+        { label = "MS",  members = { { name = "Bob",   roll = 95 } } },
+    }
+    local item = ml.addon:BannerItemFromResult(roll, winners, sections)
+    eq(#item.winners, 2, "one winner entry per copy")
+    eq(item.winners[1].name, "Alice", "first winner is the BiS roller")
+    eq(item.winners[1].section, "BiS", "first winner's bracket")
+    eq(item.winners[2].name, "Bob", "second winner is the MS roller")
+    eq(item.winners[2].section, "MS", "second winner's bracket")
+    eq(item.rolls[1].name, "Alice", "rolls are bracket-sorted: BiS first")
+    eq(item.rolls[2].name, "Bob", "then MS")
 end)
 
 test("ML cancel closes the raider's roll popup (the only sync-driven close)", function()

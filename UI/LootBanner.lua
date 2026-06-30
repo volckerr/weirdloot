@@ -297,10 +297,15 @@ local function BossBanner_OnRowEnter(self)
     GameTooltip:AddLine(self.itemName or "", q.r, q.g, q.b)
     local rolls = self.rolls
     if rolls and #rolls > 0 then
+        local winnerKeys = self.winnerKeys or {}
         for _, r in ipairs(rolls) do
             local right = r.roll and tostring(r.roll) or "-"
             if r.section and r.section ~= "" then right = right .. "  " .. r.section end
-            GameTooltip:AddDoubleLine(colorName(r.name, r.class), right, 1, 1, 1, 0.85, 0.85, 0.85)
+            if winnerKeys[util:NormalizeKey(r.name)] then
+                GameTooltip:AddDoubleLine(colorName(r.name, r.class), right, 1, 1, 1, 1, 0.82, 0)        -- winner: gold
+            else
+                GameTooltip:AddDoubleLine(colorName(r.name, r.class), right, 1, 1, 1, 0.6, 0.6, 0.6)      -- did not win: gray
+            end
         end
     else
         GameTooltip:AddLine("No rolls recorded", 0.6, 0.6, 0.6)
@@ -836,10 +841,32 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
         lootFrame.PlayerName:SetPoint("TOPLEFT", lootFrame.ItemName, "BOTTOMLEFT", 0, 0)
     end
 
-    -- class-colored winner, with the winning reason ("- BiS", "- roll 98 - MS") trailing in white
-    local nameText = colorName(data.winner, data.winnerClass)
-    if data.why and data.why ~= "" then
-        nameText = nameText .. " |cffffffff- " .. data.why .. "|r"
+    -- Winner line. A single winner reads "Name - roll N - Bracket"; a multi-copy drop awarded to
+    -- several people reads "Name (Bracket), Name2 (Bracket2)" so every winner shows at a glance.
+    -- winnerKeys lets the roll tooltip highlight the winners among all the rollers.
+    local winnerKeys = {}
+    local nameText
+    local wins = data.winners
+    if wins and #wins > 1 then
+        local parts = {}
+        for _, w in ipairs(wins) do
+            winnerKeys[util:NormalizeKey(w.name)] = true
+            parts[#parts + 1] = colorName(w.name, w.class) .. " |cffffd200" .. (w.section or "?") .. "|r"
+        end
+        nameText = table.concat(parts, ", ")
+    else
+        local w = wins and wins[1]
+        local name = w and w.name or data.winner
+        local class = w and w.class or data.winnerClass
+        local why = data.why
+        if w then
+            why = w.roll and string.format("roll %s - %s", tostring(w.roll), w.section or "?") or w.section
+        end
+        if name then winnerKeys[util:NormalizeKey(name)] = true end
+        nameText = colorName(name, class)
+        if why and why ~= "" then
+            nameText = nameText .. " |cffffffff- " .. why .. "|r"
+        end
     end
     lootFrame.PlayerName:SetText(nameText)
     lootFrame.PlayerName:SetTextColor(1, 1, 1) -- base white; the name carries its own |c color code
@@ -848,6 +875,7 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
     lootFrame.itemName = itemName
     lootFrame.itemRarity = itemRarity or 1
     lootFrame.rolls = data.rolls
+    lootFrame.winnerKeys = winnerKeys
 end
 
 -- How long the banner holds after the last row shows, mirroring the old result popup's lifetime:
@@ -1205,6 +1233,7 @@ function addon:AddLootBannerItem(item)
         winner = item.winner,
         winnerClass = item.winnerClass,
         why = item.why,
+        winners = item.winners,
         rolls = item.rolls,
     }
     if BossBanner.animState == BB_STATE_LOOT_INSERT then
@@ -1245,34 +1274,38 @@ SlashCmdList["WLBANNER"] = function()
         { n = "Borgakh", c = "Warrior" }, { n = "Anagke", c = "Paladin" },
         { n = "Thordris", c = "Shaman" }, { n = "Veylin", c = "Priest" },
     }
-    local brackets = { "BiS", "MS", "MU", "OS" }
-    local rank = { BiS = 4, MS = 3, MU = 2, OS = 1 }
+    local responses = { "bis", "ms", "mu", "os" }   -- response types handed to the real sorter
 
-    local function randomItem()
+    local function randomItem(forceQty)
         local base = bases[math.random(#bases)]
+        -- mostly single-copy; occasionally 2-3. forceQty guarantees a multi-copy example in the batch.
+        local quantity = forceQty or ((math.random(3) == 1) and math.random(2, 3) or 1)
         local pool = {}
         for _, p in ipairs(roster) do pool[#pool + 1] = p end
         for i = #pool, 2, -1 do local j = math.random(i); pool[i], pool[j] = pool[j], pool[i] end
-        local n = math.random(2, 4)
-        local rolls, best = {}, nil
+        local n = math.min(#pool, quantity + math.random(1, 3))   -- more rollers than copies, so there is a contest
+        local details, classByName = {}, {}
         for i = 1, n do
-            local bracket = brackets[math.random(#brackets)]
-            local r = { name = pool[i].n, class = pool[i].c, roll = math.random(1, 100), section = bracket }
-            rolls[#rolls + 1] = r
-            if not best or rank[bracket] > rank[best.section] or (rank[bracket] == rank[best.section] and r.roll > best.roll) then
-                best = r
+            classByName[pool[i].n] = pool[i].c
+            details[i] = { name = pool[i].n, responseType = responses[math.random(#responses)], rollText = tostring(math.random(1, 100)) }
+        end
+        -- Sort and bracket-group through the REAL roll-sorting code, so the example matches live results
+        -- exactly: highest bracket first, members by roll. The top `quantity` rollers each win a copy.
+        local sections = addon:SectionsFromResult({ allRollerDetails = details })
+        local rolls, winners = {}, {}
+        for _, s in ipairs(sections) do
+            for _, m in ipairs(s.members) do
+                local entry = { name = m.name, class = classByName[m.name], roll = m.roll, section = s.label }
+                rolls[#rolls + 1] = entry
+                if #winners < quantity then
+                    winners[#winners + 1] = { name = m.name, class = classByName[m.name], roll = m.roll, section = s.label }
+                end
             end
         end
-        return {
-            link = base.link, icon = base.icon,
-            quantity = (math.random(5) == 1) and math.random(2, 3) or 1,
-            winner = best.name, winnerClass = best.class,
-            why = string.format("roll %d - %s", best.roll, best.section),
-            rolls = rolls,
-        }
+        return { link = base.link, icon = base.icon, quantity = quantity, winners = winners, rolls = rolls }
     end
 
-    addon:AddLootBannerItem(randomItem())               -- first item starts the banner
+    addon:AddLootBannerItem(randomItem(math.random(2, 3)))   -- first item is multi-copy, to always show one
     local remaining = math.random(2, 5)                  -- how many more will trickle in
     local elapsed, nextAt = 0, 1 + math.random() * 2.5
     wlbannerTimer:SetScript("OnUpdate", function(self, e)

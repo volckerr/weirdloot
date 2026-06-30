@@ -1897,27 +1897,38 @@ function addon:BannerItemFromResult(roll, winners, sections)
         end
     end
 
-    local winnerName = winners and winners[1]
-    local winnerClass, why
-    if winnerName then
-        local wkey = util:NormalizeKey(winnerName)
-        winnerClass = getPlayerClassName(self, wkey)
+    -- One winner entry per awarded copy, each enriched with their roll + bracket from the breakdown so a
+    -- multi-copy drop shows every winner. winner/winnerClass/why mirror the first for single-winner use.
+    local winnerList = {}
+    for _, wname in ipairs(winners or {}) do
+        local wkey = util:NormalizeKey(wname)
+        local section, roll
         for _, r in ipairs(rolls) do
             if util:NormalizeKey(r.name) == wkey then
-                why = r.roll and string.format("roll %s - %s", tostring(r.roll), r.section or "?") or r.section
+                section, roll = r.section, r.roll
                 break
             end
         end
+        winnerList[#winnerList + 1] = {
+            name = wname,
+            class = getPlayerClassName(self, wkey),
+            section = section,
+            roll = roll,
+        }
     end
+
+    local first = winnerList[1]
+    local why = first and (first.roll and string.format("roll %s - %s", tostring(first.roll), first.section or "?") or first.section)
 
     return {
         key = roll.id,
         link = roll.link,
         icon = roll.icon,
         quantity = roll.quantity,
-        winner = winnerName,
-        winnerClass = winnerClass,
+        winner = first and first.name,
+        winnerClass = first and first.class,
         why = why,
+        winners = winnerList,
         rolls = rolls,
     }
 end
