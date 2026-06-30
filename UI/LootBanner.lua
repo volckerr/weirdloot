@@ -249,25 +249,26 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
         nameText = data.prompt
     else
         local wins = data.winners
-        if wins and #wins > 1 then
+        if wins and #wins > 0 then
+            -- "Name <roll> <bracket>" per winner, bracket gold; show the roll only for 1-2 winners
+            -- (3+ would run too long), e.g. "Dremera 87 MS, Anagke 17 BiS".
+            local showRolls = #wins <= 2
             local parts = {}
             for _, w in ipairs(wins) do
                 winnerKeys[util:NormalizeKey(w.name)] = true
-                parts[#parts + 1] = colorName(w.name, w.class) .. " |cffffd200" .. (w.section or "?") .. "|r"
+                local part = colorName(w.name, w.class)
+                if showRolls and w.roll then part = part .. " " .. tostring(w.roll) end
+                part = part .. " |cffffd200" .. (w.section or "?") .. "|r"
+                parts[#parts + 1] = part
             end
             nameText = table.concat(parts, ", ")
         else
-            local w = wins and wins[1]
-            local name = w and w.name or data.winner
-            local class = w and w.class or data.winnerClass
-            local why = data.why
-            if w then
-                why = w.roll and string.format("roll %s - %s", tostring(w.roll), w.section or "?") or w.section
-            end
+            -- legacy single-winner fields (no winners list)
+            local name = data.winner
             if name then winnerKeys[util:NormalizeKey(name)] = true end
-            nameText = colorName(name, class)
-            if why and why ~= "" then
-                nameText = nameText .. " |cffffffff- " .. why .. "|r"
+            nameText = colorName(name, data.winnerClass)
+            if data.why and data.why ~= "" then
+                nameText = nameText .. " |cffffd200" .. data.why .. "|r"
             end
         end
     end
@@ -1470,11 +1471,16 @@ local function runBannerExample()
     for i = #basePool, 2, -1 do local j = math.random(i); basePool[i], basePool[j] = basePool[j], basePool[i] end
     local function takeBase() return table.remove(basePool) end
 
-    local roster = {
-        { n = UnitName("player"), c = (UnitClass("player")) }, { n = "Dremera", c = "Mage" },
-        { n = "Borgakh", c = "Warrior" }, { n = "Anagke", c = "Paladin" },
-        { n = "Thordris", c = "Shaman" }, { n = "Veylin", c = "Priest" },
-    }
+    -- The player plus a few filler names. Drop any filler whose name collides with the player's (these
+    -- are real alt names), or the same person would roll twice and "win" two copies in the example.
+    local playerName = UnitName("player")
+    local roster = { { n = playerName, c = (UnitClass("player")) } }
+    for _, e in ipairs({
+        { n = "Dremera", c = "Mage" }, { n = "Borgakh", c = "Warrior" },
+        { n = "Anagke", c = "Paladin" }, { n = "Thordris", c = "Shaman" }, { n = "Veylin", c = "Priest" },
+    }) do
+        if e.n ~= playerName then roster[#roster + 1] = e end
+    end
     local responses = { "bis", "ms", "mu", "os" }
 
     local LABEL = { bis = "BiS", ms = "MS", mu = "MU", os = "OS" }
