@@ -293,9 +293,18 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
         lootFrame.Background:SetSize(269, 41)
     end
 
-    -- The left badge stands in for the (removed) banner medallion in minimalist mode only. Read the
-    -- owning banner's flag (set at play time) so it never disagrees with the chrome/layout.
-    if lootFrame:GetParent().minimal then lootFrame.Badge:Show() else lootFrame.Badge:Hide() end
+    -- The left badge and the quality-colored card border are minimalist-only (they replace the medallion
+    -- and the missing chrome's contrast). Read the owning banner's flag (set at play time) so they never
+    -- disagree with the chrome/layout.
+    local minimal = lootFrame:GetParent().minimal
+    if minimal then
+        lootFrame.Badge:Show()
+        lootFrame.IconHitBox.IconBorder:Hide()   -- the card's own quality border stands in for it
+        lootFrame:SetBackdropBorderColor(rarityColor.r, rarityColor.g, rarityColor.b, 1)
+    else
+        lootFrame.Badge:Hide()
+        lootFrame:SetBackdropBorderColor(0, 0, 0, 0)   -- hidden in full mode (SetItemButtonQuality shows the icon frame)
+    end
 end
 
 local ROW_FADE_TIME = 0.4   -- seconds a row takes to fade out once its lifetime ends
@@ -518,16 +527,17 @@ local function buildBanner(bannerName, medallionCfg)
         Background = SetAtlas(Background, "LootBanner-ItemBg", true)
         Background:SetPoint("CENTER")
 
-        frame.Icon = frame:CreateTexture(nil, "BORDER")
+        frame.Icon = frame:CreateTexture(nil, "OVERLAY")
         local Icon = frame.Icon
         Icon:SetSize(37, 37)
         Icon:SetPoint("LEFT", 14, 0)
         Icon:SetTexture("Interface\\Icons\\inv_misc_bag_felclothbag")
 
         -- Minimalist per-card badge: the dice/bag medallion shrunk to a card emblem, centered on the
-        -- icon's LEFT edge so its right half tucks behind the icon (BORDER draws over this BACKGROUND
-        -- texture) and its left half peeks off the card. Shown only in minimalist mode.
-        frame.Badge = frame:CreateTexture(nil, "BACKGROUND", nil, 1)
+        -- icon's LEFT edge so its right half tucks behind the icon and its left half peeks off the card.
+        -- 3.3.5a ignores texture SUBLEVELS, so the stack is ordered by distinct draw LAYERS instead:
+        -- quality border (BORDER) < badge (ARTWORK) < loot icon (OVERLAY). Minimalist only.
+        frame.Badge = frame:CreateTexture(nil, "ARTWORK")
         local Badge = frame.Badge
         Badge:SetSize(BADGE_SIZE, BADGE_SIZE)
         Badge:SetPoint("CENTER", Icon, "LEFT", -8, 0)   -- nudged left so more of the badge peeks out
@@ -539,7 +549,14 @@ local function buildBanner(bannerName, medallionCfg)
         end
         Badge:Hide()
 
-        frame.Count = frame:CreateFontString(nil, "ARTWORK", "NumberFontNormal")
+        -- Minimalist cards have no dark chrome behind them, so they can wash out against the world. A
+        -- soft-cornered border in the item-quality color (the same tint as the row background) gives each
+        -- card a crisp edge like the loot icon's frame. A backdrop edge keeps the corners from distorting
+        -- on the wide card. Tinted/hidden per item in ConfigureLootFrame (minimal only).
+        frame:SetBackdrop({ edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 12 })
+        frame:SetBackdropBorderColor(1, 1, 1, 0)
+
+        frame.Count = frame:CreateFontString(nil, "OVERLAY", "NumberFontNormal")   -- above the raised icon
         local Count = frame.Count
         Count:SetJustifyH("RIGHT")
         Count:SetPoint("BOTTOMRIGHT", Icon, -5, 2)
