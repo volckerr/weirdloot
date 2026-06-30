@@ -31,6 +31,9 @@ local MINIMAL_PAD = 6               -- minimalist top/bottom padding (no chrome 
 -- badge that peeks off each card's left edge (half behind the item icon). Same backend, two looks; the
 -- slash commands set it per run, and a user option will pick the default later.
 local minimalMode = false
+-- Snappy mode: make every banner animation instant (no intro flourish, no per-card slide/glow, no
+-- fade-out) in BOTH looks, for players who prefer snappy over smooth. Slash-toggled for now.
+local instantMode = false
 
 local BB_STATE_BANNER_IN = 1        -- banner is animating in
 local BB_STATE_KILL_HOLD = 2        -- banner is holding with the headline
@@ -737,7 +740,7 @@ local function buildBanner(bannerName, medallionCfg)
                     -- second click on the already-selected bracket: dismiss this roll (fade the row out)
                     rbDbg(("DISMISS idx=%s rd=%s"):format(tostring(frame.__idx), tostring(frame.rollDuration)))
                     frame.fading = true
-                    frame.fadeLeft = ROW_FADE_TIME
+                    frame.fadeLeft = BossBanner.instant and 0 or ROW_FADE_TIME
                     frame.RollTimer:Hide()
                     for _, b in ipairs(frame.RollButtons) do b:Hide() end
                     if frame.onChosen then frame.onChosen(frame.selectedBracket) end
@@ -1021,7 +1024,7 @@ local function buildBanner(bannerName, medallionCfg)
         frame.fadeLeft = 0
         frame:SetAlpha(1)
         frame:Show()
-        if frame.Anim then frame.Anim:Play() end
+        if frame.Anim and not self.instant then frame.Anim:Play() end   -- instant: card just appears
         relayoutAliveRows(self)
         if data.rollDuration then
             -- roll-prompt row: a fixed countdown of the roll timer + clickable bracket buttons. It does
@@ -1129,7 +1132,7 @@ local function buildBanner(bannerName, medallionCfg)
                     if f.timeLeft <= 0 then
                         rbDbg(("FADE idx=%s rd=%s"):format(tostring(f.__idx), tostring(f.rollDuration)))
                         f.fading = true
-                        f.fadeLeft = ROW_FADE_TIME
+                        f.fadeLeft = self.instant and 0 or ROW_FADE_TIME   -- instant: remove next tick, no fade
                         if f.rollDuration then f.RollTimer:Hide() end   -- roll time is up
                     else
                         stillCounting = stillCounting + 1
@@ -1153,10 +1156,11 @@ local function buildBanner(bannerName, medallionCfg)
     -- state onStart funcs
     local function BossBanner_AnimBannerIn(self, entry)
         self.lootShown = 0
-        if self.minimal then
-            if entry then entry.duration = 0.05 end   -- no chrome flourish: hand off to the rows at once
-        else
-            if entry then entry.duration = 0.6 end
+        if entry then
+            -- instant: hand off to the rows this frame; minimal: skip the chrome flourish; full: 0.6s unfurl
+            entry.duration = self.instant and 0 or (self.minimal and 0.05 or 0.6)
+        end
+        if not self.minimal and not self.instant then
             self.AnimIn:Play()
         end
     end
@@ -1175,6 +1179,10 @@ local function buildBanner(bannerName, medallionCfg)
     end
     local function BossBanner_AnimBannerOut(self)
         rbDbg(("OUT-start %s alive=%d"):format(bannerName, aliveRowCount(self)))
+        if self.instant then
+            BossBanner_OnAnimOutFinished(self.AnimOut)   -- close immediately, no fade
+            return true   -- redirected: don't enter the timed OUT state
+        end
         self.AnimOut:Play()
     end
 
@@ -1291,14 +1299,16 @@ local function buildBanner(bannerName, medallionCfg)
     local function BossBanner_Play(self, data)
         if not data then return end
         self.minimal = minimalMode
+        self.instant = instantMode
         -- intro: keep the unfurl + lightning, show the medallion (bag or dice) right away, no title hold.
         -- Minimalist mode hides all chrome and skips the flourish; each card's left badge stands in.
         applyMedallion(self)
         self.LootCircle:SetAlpha(0)
         self.Title:Hide()
         self.SubTitle:Hide()
+        self:SetAlpha(1)   -- a prior fade-out left the frame alpha low; instant mode never replays AnimIn to reset it
         setChromeShown(self, not self.minimal)
-        if not self.minimal then fixTranslationAnim() end
+        if not self.minimal and not self.instant then fixTranslationAnim() end
         self:Show()
         BossBanner_BeginAnims(self)
         if self.onLayoutChanged then self.onLayoutChanged() end
@@ -1598,3 +1608,9 @@ SLASH_WLBANNER1 = "/wlbanner"
 SlashCmdList["WLBANNER"] = function() minimalMode = false; runBannerExample() end
 SLASH_WLBANNERMIN1 = "/wlbannermin"
 SlashCmdList["WLBANNERMIN"] = function() minimalMode = true; runBannerExample() end
+-- `/wlbannerinstant` toggles snappy (instant) animations for both modes; re-run /wlbanner(min) to see it.
+SLASH_WLBANNERINSTANT1 = "/wlbannerinstant"
+SlashCmdList["WLBANNERINSTANT"] = function()
+    instantMode = not instantMode
+    print("WeirdLoot banner animations: " .. (instantMode and "INSTANT (snappy)" or "smooth"))
+end
