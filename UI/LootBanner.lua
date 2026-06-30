@@ -610,6 +610,17 @@ local function buildBanner(bannerName, medallionCfg)
             end
         end
 
+        -- Roll countdown bar along the row's bottom edge (shown only for roll-prompt rows), styled like
+        -- the interest popup's timer: shrinks and shifts green -> red as the roll time runs out.
+        frame.RollTimer = CreateFrame("StatusBar", nil, frame)
+        frame.RollTimer:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 8, 3)
+        frame.RollTimer:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -8, 3)
+        frame.RollTimer:SetHeight(3)
+        frame.RollTimer:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+        frame.RollTimer:SetMinMaxValues(0, 1)
+        frame.RollTimer:SetValue(1)
+        frame.RollTimer:Hide()
+
         return frame
     end
 
@@ -865,13 +876,25 @@ local function buildBanner(bannerName, medallionCfg)
         frame:Show()
         if frame.Anim then frame.Anim:Play() end
         relayoutAliveRows(self)
-        -- New row gets the full lifetime; each additional drop EXTENDS the rows already shown by half
+        if data.rollDuration then
+            -- roll-prompt row: a fixed countdown of the roll timer, shown by its own bar. It does not
+            -- extend or get extended (each roll runs its own clock).
+            frame.rollDuration = data.rollDuration
+            frame.timeLeft = data.rollDuration
+            frame.RollTimer:SetValue(1)
+            frame.RollTimer:SetStatusBarColor(0, 1, 0.1)
+            frame.RollTimer:Show()
+            return
+        end
+        frame.rollDuration = nil
+        frame.RollTimer:Hide()
+        -- Won row: full lifetime; each additional drop EXTENDS the (won) rows already shown by half
         -- (capped at full), reviving any that were mid-fade, so earlier items linger to be read.
         local full = resultHoldSeconds()
         frame.timeLeft = full or 86400
         if additional and full then
             for _, f in ipairs(self.LootFrames) do
-                if f.alive and f ~= frame then
+                if f.alive and f ~= frame and not f.rollDuration then
                     f.timeLeft = math.min(max(f.timeLeft, 0) + full / 2, full)
                     if f.fading then
                         f.fading = false
@@ -895,7 +918,8 @@ local function buildBanner(bannerName, medallionCfg)
             self.hoveredThisVisit = false
             self.hoverGrace = nil
             for _, f in ipairs(self.LootFrames) do
-                if f.alive and not f.fading then f.timeLeft = 2 end
+                -- roll rows keep their own clock; only won rows collapse to a 2s exit on mouse-off
+                if f.alive and not f.fading and not f.rollDuration then f.timeLeft = 2 end
             end
         end
         local removed, stillCounting = false, 0
@@ -916,8 +940,14 @@ local function buildBanner(bannerName, medallionCfg)
                     if f.timeLeft <= 0 then
                         f.fading = true
                         f.fadeLeft = ROW_FADE_TIME
+                        if f.rollDuration then f.RollTimer:Hide() end   -- roll time is up
                     else
                         stillCounting = stillCounting + 1
+                        if f.rollDuration then
+                            local frac = max(f.timeLeft, 0) / f.rollDuration
+                            f.RollTimer:SetValue(frac)
+                            f.RollTimer:SetStatusBarColor(1 - frac, frac, 0.1)   -- green -> red
+                        end
                     end
                 end
             end
@@ -1090,7 +1120,7 @@ local function buildBanner(bannerName, medallionCfg)
         local data = {
             itemLink = item.link, texture = item.icon, quantity = item.quantity or 1,
             winner = item.winner, winnerClass = item.winnerClass, why = item.why,
-            winners = item.winners, rolls = item.rolls, prompt = item.prompt,
+            winners = item.winners, rolls = item.rolls, prompt = item.prompt, rollDuration = item.rollDuration,
         }
         if self.animState == BB_STATE_LOOT_INSERT then
             addRow(self, data)
@@ -1215,37 +1245,72 @@ SlashCmdList["WLBANNER"] = function()
     }
     local responses = { "bis", "ms", "mu", "os" }
 
+    local LABEL = { bis = "BiS", ms = "MS", mu = "MU", os = "OS" }
+    local bracketRank = { bis = 4, ms = 3, mu = 2, os = 1 }
+    local statuses = { "main", "designatedalt", "nil" }
+    local statusRank = { main = 3, designatedalt = 2, ["nil"] = 1 }
+
     local function wonItem(forceQty)
         local base = bases[math.random(#bases)]
         local quantity = forceQty or ((math.random(3) == 1) and math.random(2, 3) or 1)
         local pool = {}
         for _, p in ipairs(roster) do pool[#pool + 1] = p end
         for i = #pool, 2, -1 do local j = math.random(i); pool[i], pool[j] = pool[j], pool[i] end
-        local n = math.min(#pool, quantity + math.random(1, 3))
+        local n = math.min(#pool, quantity + math.random(1, 4))
+
+        -- rollers get a bracket, roll, raid status, and an occasional "named on the item" (LC prio) flag
         local details, classByName = {}, {}
         for i = 1, n do
             classByName[pool[i].n] = pool[i].c
-            details[i] = { name = pool[i].n, responseType = responses[math.random(#responses)], rollText = tostring(math.random(1, 100)) }
+            details[i] = {
+                name = pool[i].n,
+                responseType = responses[math.random(#responses)],
+                rollText = tostring(math.random(1, 100)),
+                status = statuses[math.random(#statuses)],
+                isNamed = false,
+            }
         end
-        local sections = addon:SectionsFromResult({ allRollerDetails = details })  -- real roll sort
-        local rolls, winners = {}, {}
-        for _, s in ipairs(sections) do
+        if math.random(2) == 1 then details[math.random(n)].isNamed = true end   -- ~half: one named roller
+
+        -- Breakdown (tooltip) via the REAL bracket sort; a named roller keeps its bracket spot but is
+        -- labelled "LC Prio".
+        local rolls = {}
+        for _, s in ipairs(addon:SectionsFromResult({ allRollerDetails = details })) do
             for _, m in ipairs(s.members) do
-                local entry = { name = m.name, class = classByName[m.name], roll = m.roll, section = s.label }
-                rolls[#rolls + 1] = entry
-                if #winners < quantity then
-                    winners[#winners + 1] = { name = m.name, class = classByName[m.name], roll = m.roll, section = s.label }
-                end
+                rolls[#rolls + 1] = { name = m.name, class = classByName[m.name], roll = m.roll,
+                    section = m.isNamed and "LC Prio" or s.label }
             end
+        end
+
+        -- Winners by the resolver's actual priority: a named roller wins a copy regardless of rolls,
+        -- then bracket (BiS>MS>MU>OS), then status (main>desAlt>nil), then roll.
+        local ranked = {}
+        for _, d in ipairs(details) do
+            ranked[#ranked + 1] = { name = d.name, class = classByName[d.name], roll = tonumber(d.rollText),
+                bracket = d.responseType, status = d.status, isNamed = d.isNamed }
+        end
+        table.sort(ranked, function(a, b)
+            if a.isNamed ~= b.isNamed then return a.isNamed end
+            if bracketRank[a.bracket] ~= bracketRank[b.bracket] then return bracketRank[a.bracket] > bracketRank[b.bracket] end
+            if statusRank[a.status] ~= statusRank[b.status] then return statusRank[a.status] > statusRank[b.status] end
+            return a.roll > b.roll
+        end)
+        local winners = {}
+        for i = 1, math.min(quantity, #ranked) do
+            local r = ranked[i]
+            winners[i] = { name = r.name, class = r.class, roll = r.roll,
+                section = r.isNamed and "LC Prio" or LABEL[r.bracket] }
         end
         return { link = base.link, icon = base.icon, quantity = quantity, winners = winners, rolls = rolls }
     end
 
     local function rollItem()
         local base = bases[math.random(#bases)]
-        -- prototype drop row: prio + bracket options as text (real clickable buttons are the next step)
+        -- prototype drop row: prio + bracket options as text (real clickable buttons are the next step),
+        -- and a roll countdown bar driven by the configured roll duration.
+        local rollDur = (addon.db and addon.db.options and tonumber(addon.db.options.rollDuration)) or 20
         return { link = base.link, icon = base.icon, quantity = 1,
-            prompt = "Roll:  |cffffd200BiS|r  MS  MU  OS  TM  Pass" }
+            prompt = "Roll:  |cffffd200BiS|r  MS  MU  OS  TM  Pass", rollDuration = rollDur }
     end
 
     -- DROPS banner: a couple of items up for roll (dice medallion).
