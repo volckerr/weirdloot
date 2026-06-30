@@ -24,6 +24,13 @@ local WON_ROW_H = 44                -- win card: icon + name + winner line
 local DROP_ROW_H = 62               -- roll card is taller: name + prio line + bracket buttons
 local ROW_GAP = 2                   -- vertical gap between stacked rows
 local BB_MAX_LOOT = 8
+local BADGE_SIZE = 37               -- minimalist per-card badge (dice/bag), same size as the loot icon
+local MINIMAL_PAD = 6               -- minimalist top/bottom padding (no chrome to reserve)
+
+-- Minimalist mode: drop the banner header/footer chrome and turn the dice/bag medallion into a per-card
+-- badge that peeks off each card's left edge (half behind the item icon). Same backend, two looks; the
+-- slash commands set it per run, and a user option will pick the default later.
+local minimalMode = false
 
 local BB_STATE_BANNER_IN = 1        -- banner is animating in
 local BB_STATE_KILL_HOLD = 2        -- banner is holding with the headline
@@ -155,6 +162,27 @@ local function SetItemButtonQuality(button, quality)
     end
 end
 
+-- Dock the roll-breakdown tooltip per the user's rollResultTooltipAnchor Options setting, the same
+-- mapping the roll popup uses (addon:RollTooltipAnchorPoints). Returns having set the tooltip owner.
+local function anchorBannerTooltip(owner)
+    local point, relPoint, x, y = addon:RollTooltipAnchorPoints()
+    if not point then
+        GameTooltip:SetOwner(owner, "ANCHOR_CURSOR")   -- CURSOR mode
+        return
+    end
+    GameTooltip:SetOwner(owner, "ANCHOR_NONE")
+    GameTooltip:ClearAllPoints()
+    GameTooltip:SetPoint(point, owner, relPoint, x, y)
+end
+
+-- Show/hide all of a banner's own chrome (medallion, header/footer art, glows, lightning, title). The
+-- loot rows are child frames, not regions, so they are untouched. Minimalist mode hides all of it.
+local function setChromeShown(banner, shown)
+    for _, r in ipairs({ banner:GetRegions() }) do
+        if shown then r:Show() else r:Hide() end
+    end
+end
+
 local itemScanTooltip   -- single shared hidden scanning tooltip
 local function BossBanner_ConfigureLootFrame(lootFrame, data)
     -- data: { itemLink, texture, quantity, winner/winners/why, rolls } or a roll prompt { prompt }
@@ -251,6 +279,7 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
     lootFrame.itemRarity = itemRarity or 1
     lootFrame.rolls = data.rolls
     lootFrame.winnerKeys = winnerKeys
+    lootFrame.onChosen = data.onChosen
 
     -- Roll cards are taller (name + prio + buttons); win cards only need name + winner. Stretch the
     -- row background to the frame so the art fills either height.
@@ -263,6 +292,10 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
         lootFrame.rowHeight = WON_ROW_H
         lootFrame.Background:SetSize(269, 41)
     end
+
+    -- The left badge stands in for the (removed) banner medallion in minimalist mode only. Read the
+    -- owning banner's flag (set at play time) so it never disagrees with the chrome/layout.
+    if lootFrame:GetParent().minimal then lootFrame.Badge:Show() else lootFrame.Badge:Hide() end
 end
 
 local ROW_FADE_TIME = 0.4   -- seconds a row takes to fade out once its lifetime ends
@@ -438,18 +471,19 @@ local function buildBanner(bannerName, medallionCfg)
 
     local function BossBanner_OnRowEnter(self)
         if BossBanner.animState == BB_STATE_BANNER_OUT or BossBanner.showingTooltip then return end
-        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        anchorBannerTooltip(self)
         local q = ITEM_QUALITY_COLORS[self.itemRarity or 1]
         GameTooltip:AddLine(self.itemName or "", q.r, q.g, q.b)
         local rolls = self.rolls
         if rolls and #rolls > 0 then
             local winnerKeys = self.winnerKeys or {}
-            local prevSection
+            local prevGroup
             for _, r in ipairs(rolls) do
-                if prevSection and r.section ~= prevSection then
+                local grp = r.group or r.section   -- separate on the bracket, so BiS Main/Alt tiers stay adjacent
+                if prevGroup and grp ~= prevGroup then
                     GameTooltip:AddLine(" ")   -- slight gap between bracket groups (rolls come priority-ordered)
                 end
-                prevSection = r.section
+                prevGroup = grp
                 local right = r.roll and tostring(r.roll) or "-"
                 if r.section and r.section ~= "" then right = right .. "  " .. r.section end
                 if winnerKeys[util:NormalizeKey(r.name)] then
@@ -489,6 +523,21 @@ local function buildBanner(bannerName, medallionCfg)
         Icon:SetSize(37, 37)
         Icon:SetPoint("LEFT", 14, 0)
         Icon:SetTexture("Interface\\Icons\\inv_misc_bag_felclothbag")
+
+        -- Minimalist per-card badge: the dice/bag medallion shrunk to a card emblem, centered on the
+        -- icon's LEFT edge so its right half tucks behind the icon (BORDER draws over this BACKGROUND
+        -- texture) and its left half peeks off the card. Shown only in minimalist mode.
+        frame.Badge = frame:CreateTexture(nil, "BACKGROUND", nil, 1)
+        local Badge = frame.Badge
+        Badge:SetSize(BADGE_SIZE, BADGE_SIZE)
+        Badge:SetPoint("CENTER", Icon, "LEFT", -8, 0)   -- nudged left so more of the badge peeks out
+        if medallionCfg and medallionCfg.texture then
+            Badge:SetTexture(medallionCfg.texture)
+            Badge:SetTexCoord(0, 1, 0, 1)
+        else
+            SetAtlas(Badge, (medallionCfg and medallionCfg.atlas) or "LootBanner-LootBagCircle", false)
+        end
+        Badge:Hide()
 
         frame.Count = frame:CreateFontString(nil, "ARTWORK", "NumberFontNormal")
         local Count = frame.Count
@@ -673,6 +722,7 @@ local function buildBanner(bannerName, medallionCfg)
                     frame.fadeLeft = ROW_FADE_TIME
                     frame.RollTimer:Hide()
                     for _, b in ipairs(frame.RollButtons) do b:Hide() end
+                    if frame.onChosen then frame.onChosen(frame.selectedBracket) end
                     return
                 end
                 for _, b in ipairs(frame.RollButtons) do
@@ -684,6 +734,7 @@ local function buildBanner(bannerName, medallionCfg)
                 self:LockHighlight()
                 self:GetFontString():SetTextColor(0, 1, 0)       -- selected: green
                 frame.selectedBracket = self.bracket
+                -- (real use: the player's pick would be sent to the ML here)
             end)
             btn:Hide()
             frame.RollButtons[#frame.RollButtons + 1] = btn
@@ -912,14 +963,21 @@ local function buildBanner(bannerName, medallionCfg)
                 if prev then
                     f:SetPoint("TOP", prev, "BOTTOM", 0, -ROW_GAP)
                 else
-                    f:SetPoint("TOP", self, "TOP", 0, -84)
+                    -- full mode reserves the medallion header (-84); minimalist starts near the top
+                    f:SetPoint("TOP", self, "TOP", 0, self.minimal and -MINIMAL_PAD or -84)
                 end
                 prev = f
             end
         end
-        -- baseHeight reserves the chrome around one standard (won) row; swap that row's height out for
-        -- the real per-row heights + gaps, so taller roll cards grow the banner by their extra height.
-        self:SetHeight((self.baseHeight - WON_ROW_H) + rowsTotal + max(count - 1, 0) * ROW_GAP)
+        local gaps = max(count - 1, 0) * ROW_GAP
+        if self.minimal then
+            -- no chrome: height is just the rows + a little padding top and bottom
+            self:SetHeight(rowsTotal + gaps + MINIMAL_PAD * 2)
+        else
+            -- baseHeight reserves the chrome around one standard (won) row; swap that row's height out for
+            -- the real per-row heights + gaps, so taller roll cards grow the banner by their extra height.
+            self:SetHeight((self.baseHeight - WON_ROW_H) + rowsTotal + gaps)
+        end
         return count
     end
 
@@ -1075,9 +1133,14 @@ local function buildBanner(bannerName, medallionCfg)
     end
 
     -- state onStart funcs
-    local function BossBanner_AnimBannerIn(self)
+    local function BossBanner_AnimBannerIn(self, entry)
         self.lootShown = 0
-        self.AnimIn:Play()
+        if self.minimal then
+            if entry then entry.duration = 0.05 end   -- no chrome flourish: hand off to the rows at once
+        else
+            if entry then entry.duration = 0.6 end
+            self.AnimIn:Play()
+        end
     end
     local function BossBanner_AnimKillHold() end
     local function BossBanner_AnimSwitch(self, entry)
@@ -1209,12 +1272,15 @@ local function buildBanner(bannerName, medallionCfg)
 
     local function BossBanner_Play(self, data)
         if not data then return end
-        fixTranslationAnim()
-        -- intro: keep the unfurl + lightning, show the medallion (bag or dice) right away, no title hold
+        self.minimal = minimalMode
+        -- intro: keep the unfurl + lightning, show the medallion (bag or dice) right away, no title hold.
+        -- Minimalist mode hides all chrome and skips the flourish; each card's left badge stands in.
         applyMedallion(self)
         self.LootCircle:SetAlpha(0)
         self.Title:Hide()
         self.SubTitle:Hide()
+        setChromeShown(self, not self.minimal)
+        if not self.minimal then fixTranslationAnim() end
         self:Show()
         BossBanner_BeginAnims(self)
         if self.onLayoutChanged then self.onLayoutChanged() end
@@ -1241,6 +1307,7 @@ local function buildBanner(bannerName, medallionCfg)
             winners = item.winners, rolls = item.rolls, prompt = item.prompt, rollDuration = item.rollDuration,
             disabled = item.disabled,   -- set of bracket labels (e.g. {OS=true}) the player can't pick
             prio = item.prio,           -- roll card only: the item's listed priority, shown under the name
+            onChosen = item.onChosen,   -- roll card only: fired with the chosen bracket when the card is dismissed
         }
         if self.animState == BB_STATE_LOOT_INSERT then
             addRow(self, data)
@@ -1324,7 +1391,9 @@ local function layoutRegion()
     dropsBanner:SetPoint("TOP", UIParent, 0, REGION_TOP)
     awardedBanner:ClearAllPoints()
     if dropsBanner:IsShown() then
-        awardedBanner:SetPoint("TOP", dropsBanner, "BOTTOM", 0, REGION_OVERLAP)   -- moves as drops resizes
+        -- full mode overlaps into the drops footer chrome; minimalist has none, so just leave a small gap
+        local gap = minimalMode and -MINIMAL_PAD or REGION_OVERLAP
+        awardedBanner:SetPoint("TOP", dropsBanner, "BOTTOM", 0, gap)   -- moves as drops resizes
     else
         awardedBanner:SetPoint("TOP", UIParent, 0, REGION_TOP)
     end
@@ -1353,8 +1422,23 @@ end
 -- DEBUG preview: strip before commit. `/wlbanner` drives BOTH banners with sample data so the stacked
 -- region (dice drops + bag awarded, both with the lightning intro) can be seen under realistic flow.
 local wlbannerTimer = CreateFrame("Frame")
-SLASH_WLBANNER1 = "/wlbanner"
-SlashCmdList["WLBANNER"] = function()
+
+-- EXAMPLE ONLY: fire one-shot callbacks after a delay (used to show a chosen roll as a win a couple
+-- seconds after it's dismissed). This is demo plumbing for /wlbanner, NOT real banner behavior.
+local exampleDeferQueue = {}
+local exampleDefer = CreateFrame("Frame")
+exampleDefer:SetScript("OnUpdate", function(_, e)
+    for i = #exampleDeferQueue, 1, -1 do
+        local job = exampleDeferQueue[i]
+        job.t = job.t - e
+        if job.t <= 0 then table.remove(exampleDeferQueue, i); job.fn() end
+    end
+end)
+local function exampleAfter(delay, fn)
+    exampleDeferQueue[#exampleDeferQueue + 1] = { t = delay, fn = fn }
+end
+
+local function runBannerExample()
     local bases = {
         { link = "|cffa335ee|Hitem:40629:0:0:0:0:0:0:0:0|h[Gauntlets of the Lost Protector]|h|r", icon = "Interface\\Icons\\inv_gauntlets_28" },
         { link = "|cff0070dd|Hitem:40207:0:0:0:0:0:0:0:0|h[Gloves of the Lost Protector]|h|r", icon = "Interface\\Icons\\inv_gauntlets_25" },
@@ -1362,6 +1446,13 @@ SlashCmdList["WLBANNER"] = function()
         { link = "|cff1eff00|Hitem:39071:0:0:0:0:0:0:0:0|h[Wending Cloak]|h|r", icon = "Interface\\Icons\\inv_misc_cape_19" },
         { link = "|cffff8000|Hitem:49623:0:0:0:0:0:0:0:0|h[Shadowmourne]|h|r", icon = "Interface\\Icons\\inv_axe_113" },
     }
+    -- Example only (not real-use logic): hand out each base at most once so no two cards show the same
+    -- item. A single card may still display a multi-copy quantity; we just never duplicate an item card.
+    local basePool = {}
+    for _, b in ipairs(bases) do basePool[#basePool + 1] = b end
+    for i = #basePool, 2, -1 do local j = math.random(i); basePool[i], basePool[j] = basePool[j], basePool[i] end
+    local function takeBase() return table.remove(basePool) end
+
     local roster = {
         { n = UnitName("player"), c = (UnitClass("player")) }, { n = "Dremera", c = "Mage" },
         { n = "Borgakh", c = "Warrior" }, { n = "Anagke", c = "Paladin" },
@@ -1370,12 +1461,9 @@ SlashCmdList["WLBANNER"] = function()
     local responses = { "bis", "ms", "mu", "os" }
 
     local LABEL = { bis = "BiS", ms = "MS", mu = "MU", os = "OS" }
-    local bracketRank = { bis = 4, ms = 3, mu = 2, os = 1 }
     local statuses = { "main", "designatedalt", "nil" }
-    local statusRank = { main = 3, designatedalt = 2, ["nil"] = 1 }
 
-    local function wonItem(forceQty)
-        local base = bases[math.random(#bases)]
+    local function buildWon(base, forceQty)
         local quantity = forceQty or ((math.random(3) == 1) and math.random(2, 3) or 1)
         local pool = {}
         for _, p in ipairs(roster) do pool[#pool + 1] = p end
@@ -1389,23 +1477,31 @@ SlashCmdList["WLBANNER"] = function()
             details[i] = {
                 name = pool[i].n,
                 responseType = responses[math.random(#responses)],
-                rollText = tostring(math.random(1, 100)),
+                roll = math.random(1, 100),
                 status = statuses[math.random(#statuses)],
                 isNamed = false,
             }
         end
         if math.random(2) == 1 then details[math.random(n)].isNamed = true end   -- ~half: one named roller
 
-        -- Breakdown (tooltip) grouped and ordered by effective priority: LC (named) is its own top tier,
-        -- then BiS > MS > MU > OS, each group sorted by roll. A named roller shows under LC, not the
-        -- response bracket they happened to pick.
-        local priorityOrder = { "LC", "BiS", "MS", "MU", "OS" }
+        -- Breakdown grouping mirrors the resolver's status gate: within BiS a Main beats any Alt
+        -- regardless of roll, so BiS splits into a "BiS - Main" tier above a "BiS - Alt" tier. MS/MU/OS
+        -- are pure roll (status only gates roster-vs-nil there, which the example glosses over). `group`
+        -- is the bracket the tooltip separates on; `section` is the display label. Named rollers go under
+        -- LC, their own top tier.
+        local function groupOf(d) return d.isNamed and "LC" or (d.responseType == "bis" and "BiS" or LABEL[d.responseType]) end
+        local function sectionOf(d)
+            if d.isNamed then return "LC" end
+            if d.responseType == "bis" then return (d.status == "main") and "BiS - Main" or "BiS - Alt" end
+            return LABEL[d.responseType]
+        end
+        local priorityOrder = { "LC", "BiS - Main", "BiS - Alt", "MS", "MU", "OS" }
         local groups = {}
         for _, d in ipairs(details) do
-            local sec = d.isNamed and "LC" or LABEL[d.responseType]
+            local sec = sectionOf(d)
             groups[sec] = groups[sec] or {}
             groups[sec][#groups[sec] + 1] = { name = d.name, class = classByName[d.name],
-                roll = tonumber(d.rollText), section = sec }
+                roll = d.roll, section = sec, group = groupOf(d) }
         end
         local rolls = {}
         for _, sec in ipairs(priorityOrder) do
@@ -1416,40 +1512,45 @@ SlashCmdList["WLBANNER"] = function()
             end
         end
 
-        -- Winners by the resolver's actual priority: a named roller wins a copy regardless of rolls,
-        -- then bracket (BiS>MS>MU>OS), then status (main>desAlt>nil), then roll.
-        local ranked = {}
-        for _, d in ipairs(details) do
-            ranked[#ranked + 1] = { name = d.name, class = classByName[d.name], roll = tonumber(d.rollText),
-                bracket = d.responseType, status = d.status, isNamed = d.isNamed }
-        end
-        table.sort(ranked, function(a, b)
-            if a.isNamed ~= b.isNamed then return a.isNamed end
-            if bracketRank[a.bracket] ~= bracketRank[b.bracket] then return bracketRank[a.bracket] > bracketRank[b.bracket] end
-            if statusRank[a.status] ~= statusRank[b.status] then return statusRank[a.status] > statusRank[b.status] end
-            return a.roll > b.roll
-        end)
+        -- Winners are simply the first `quantity` of that priority-ordered, roll-sorted breakdown: named
+        -- (LC) take copies first, then BiS Mains, then BiS Alts, then MS/MU/OS by roll. A copy never goes
+        -- to a lower roll within the same tier. The winner line shows the short bracket, not the Main/Alt tier.
         local winners = {}
-        for i = 1, math.min(quantity, #ranked) do
-            local r = ranked[i]
-            winners[i] = { name = r.name, class = r.class, roll = r.roll,
-                section = r.isNamed and "LC" or LABEL[r.bracket] }
+        for i = 1, math.min(quantity, #rolls) do
+            local m = rolls[i]
+            winners[i] = { name = m.name, class = m.class, roll = m.roll, section = m.group }
         end
         return { link = base.link, icon = base.icon, quantity = quantity, winners = winners, rolls = rolls }
+    end
+    local function wonItem(forceQty)
+        local base = takeBase()
+        if not base then return nil end   -- example pool exhausted: skip rather than repeat an item
+        return buildWon(base, forceQty)
     end
 
     local samplePrios = { "DK > Warrior > MS", "MS > OS", "LC", "Healers > MS" }
     local function rollItem()
-        local base = bases[math.random(#bases)]
+        local base = takeBase()
+        if not base then return nil end   -- example pool exhausted: skip rather than repeat an item
         -- drop row: clickable bracket buttons + a roll countdown bar driven by the configured duration
         local rollDur = (addon.db and addon.db.options and tonumber(addon.db.options.rollDuration)) or 30
+        local awarded = false
         return { link = base.link, icon = base.icon, quantity = 1, rollDuration = rollDur,
-            prio = samplePrios[math.random(#samplePrios)] }
+            prio = samplePrios[math.random(#samplePrios)],
+            -- EXAMPLE ONLY: when the player dismisses this roll by selecting a bracket twice, drop the
+            -- same item into the won section ~2s later, as if the roll resolved in their favor. Real
+            -- banners get wins from the loot master's resolve, never from a local click; this only
+            -- exists to demo the roll -> won flow in /wlbanner.
+            onChosen = function(bracket)
+                if awarded or bracket == "Pass" then return end
+                awarded = true
+                exampleAfter(2, function() addon:AddLootBannerItem(buildWon(base, 1)) end)
+            end }
     end
 
     -- DROPS banner: a couple of items up for roll (dice medallion).
     local firstRoll = rollItem()
-    firstRoll.disabled = { MU = true, OS = true, TM = true }   -- preview #1: standard disabled brackets
+    if firstRoll then firstRoll.disabled = { MU = true, OS = true, TM = true } end   -- preview #1: standard disabled brackets
     addon:AddRollBannerItem(firstRoll)
     addon:AddRollBannerItem(rollItem())
 
@@ -1467,3 +1568,10 @@ SlashCmdList["WLBANNER"] = function()
         end
     end)
 end
+
+-- `/wlbanner` = full chrome, `/wlbannermin` = minimalist (no header/footer, per-card dice/bag badge).
+-- Same backend; the mode flag is the only difference. A user option will pick the default later.
+SLASH_WLBANNER1 = "/wlbanner"
+SlashCmdList["WLBANNER"] = function() minimalMode = false; runBannerExample() end
+SLASH_WLBANNERMIN1 = "/wlbannermin"
+SlashCmdList["WLBANNERMIN"] = function() minimalMode = true; runBannerExample() end
