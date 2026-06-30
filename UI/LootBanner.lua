@@ -20,7 +20,9 @@ local ICON_BORDER_TEXTURE = "Interface\\AddOns\\WeirdLoot\\Textures\\WhiteIconFr
 local DICE_TEXTURE = "Interface\\Buttons\\UI-GroupLoot-Dice-Up"   -- drops-banner medallion (vs the bag)
 
 local BB_EXPAND_TIME = 0.25         -- time to expand per item
-local BB_EXPAND_HEIGHT = 50         -- pixels to expand per item
+local WON_ROW_H = 44                -- win card: icon + name + winner line
+local DROP_ROW_H = 62               -- roll card is taller: name + prio line + bracket buttons
+local ROW_GAP = 2                   -- vertical gap between stacked rows
 local BB_MAX_LOOT = 8
 
 local BB_STATE_BANNER_IN = 1        -- banner is animating in
@@ -197,13 +199,13 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
         lootFrame.SetName:SetText(("Set: %s"):format(setName))
         lootFrame.SetName:Show()
         lootFrame.PlayerName:ClearAllPoints()
-        lootFrame.PlayerName:SetPoint("TOPLEFT", lootFrame.SetName, "BOTTOMLEFT", 0, 0)
+        lootFrame.PlayerName:SetPoint("TOPLEFT", lootFrame.SetName, "BOTTOMLEFT", 0, -2)
     else
         lootFrame.ItemName:ClearAllPoints()
         lootFrame.ItemName:SetPoint("TOPLEFT", 56, -7)
         lootFrame.SetName:Hide()
         lootFrame.PlayerName:ClearAllPoints()
-        lootFrame.PlayerName:SetPoint("TOPLEFT", lootFrame.ItemName, "BOTTOMLEFT", 0, 0)
+        lootFrame.PlayerName:SetPoint("TOPLEFT", lootFrame.ItemName, "BOTTOMLEFT", 0, -2)
     end
 
     -- Second line. A roll prompt passes a pre-formatted `prompt` (prio + bracket options); an awarded
@@ -212,7 +214,9 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
     local winnerKeys = {}
     local nameText
     if data.rollDuration then
-        nameText = ""   -- roll-prompt row: the bracket buttons occupy this line
+        -- roll card: the item's prio sits under the name (bracket buttons sit below it), mirroring
+        -- the original roll popup's "Prio:" line.
+        nameText = "|cffffffffPrio:|r " .. (data.prio and data.prio ~= "" and data.prio or "Open")
     elseif data.prompt then
         nameText = data.prompt
     else
@@ -247,6 +251,18 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
     lootFrame.itemRarity = itemRarity or 1
     lootFrame.rolls = data.rolls
     lootFrame.winnerKeys = winnerKeys
+
+    -- Roll cards are taller (name + prio + buttons); win cards only need name + winner. Stretch the
+    -- row background to the frame so the art fills either height.
+    if data.rollDuration then
+        lootFrame:SetHeight(DROP_ROW_H)
+        lootFrame.rowHeight = DROP_ROW_H
+        lootFrame.Background:SetSize(269, DROP_ROW_H - 3)
+    else
+        lootFrame:SetHeight(WON_ROW_H)
+        lootFrame.rowHeight = WON_ROW_H
+        lootFrame.Background:SetSize(269, 41)
+    end
 end
 
 local ROW_FADE_TIME = 0.4   -- seconds a row takes to fade out once its lifetime ends
@@ -647,7 +663,7 @@ local function buildBanner(bannerName, medallionCfg)
             btn:SetText(b[1])
             btn:SetWidth(b[2])
             btn:SetHeight(17)
-            btn:SetPoint("TOPLEFT", frame, "TOPLEFT", bx, -20)
+            btn:SetPoint("TOPLEFT", frame, "TOPLEFT", bx, -38)   -- below the name + prio line on roll cards
             btn.bracket = b[1]
             btn:SetScript("OnClick", function(self)
                 if frame.selectedBracket == self.bracket then
@@ -660,8 +676,10 @@ local function buildBanner(bannerName, medallionCfg)
                     return
                 end
                 for _, b in ipairs(frame.RollButtons) do
-                    b:UnlockHighlight()
-                    b:GetFontString():SetTextColor(1, 0.82, 0)   -- gold (default)
+                    if b:GetButtonState() ~= "DISABLED" then   -- leave disabled brackets grayed out
+                        b:UnlockHighlight()
+                        b:GetFontString():SetTextColor(1, 0.82, 0)   -- gold (default)
+                    end
                 end
                 self:LockHighlight()
                 self:GetFontString():SetTextColor(0, 1, 0)       -- selected: green
@@ -885,21 +903,23 @@ local function buildBanner(bannerName, medallionCfg)
     local BossBanner_OnAnimOutFinished, BossBanner_BeginAnims, fixTranslationAnim
 
     function relayoutAliveRows(self)
-        local prev, count = nil, 0
+        local prev, count, rowsTotal = nil, 0, 0
         for _, f in ipairs(self.LootFrames) do
             if f.alive then
                 count = count + 1
+                rowsTotal = rowsTotal + (f.rowHeight or WON_ROW_H)
                 f:ClearAllPoints()
                 if prev then
-                    f:SetPoint("TOP", prev, "BOTTOM", 0, -6)
+                    f:SetPoint("TOP", prev, "BOTTOM", 0, -ROW_GAP)
                 else
                     f:SetPoint("TOP", self, "TOP", 0, -84)
                 end
                 prev = f
             end
         end
-        -- baseHeight already reserves the first row + bottom chrome; only rows beyond the first add height.
-        self:SetHeight(self.baseHeight + max(count - 1, 0) * BB_EXPAND_HEIGHT)
+        -- baseHeight reserves the chrome around one standard (won) row; swap that row's height out for
+        -- the real per-row heights + gaps, so taller roll cards grow the banner by their extra height.
+        self:SetHeight((self.baseHeight - WON_ROW_H) + rowsTotal + max(count - 1, 0) * ROW_GAP)
         return count
     end
 
@@ -939,8 +959,12 @@ local function buildBanner(bannerName, medallionCfg)
             for _, btn in ipairs(frame.RollButtons) do
                 btn:SetAlpha(1)   -- a reused slot may carry a stale fade alpha from its previous life
                 btn:UnlockHighlight()
+                -- Set the text color explicitly for the button's state so the look is deterministic and
+                -- doesn't depend on Disable()'s font handling: gray for restricted brackets (mirrors the
+                -- roll popup's styleButtonText), gold otherwise.
                 if data.disabled and data.disabled[btn.bracket] then
-                    btn:Disable()   -- standard grayed-out disabled look (no opacity change)
+                    btn:Disable()
+                    btn:GetFontString():SetTextColor(0.5, 0.5, 0.5)
                 else
                     btn:Enable()
                     btn:GetFontString():SetTextColor(1, 0.82, 0)
@@ -1216,6 +1240,7 @@ local function buildBanner(bannerName, medallionCfg)
             winner = item.winner, winnerClass = item.winnerClass, why = item.why,
             winners = item.winners, rolls = item.rolls, prompt = item.prompt, rollDuration = item.rollDuration,
             disabled = item.disabled,   -- set of bracket labels (e.g. {OS=true}) the player can't pick
+            prio = item.prio,           -- roll card only: the item's listed priority, shown under the name
         }
         if self.animState == BB_STATE_LOOT_INSERT then
             addRow(self, data)
@@ -1413,11 +1438,13 @@ SlashCmdList["WLBANNER"] = function()
         return { link = base.link, icon = base.icon, quantity = quantity, winners = winners, rolls = rolls }
     end
 
+    local samplePrios = { "DK > Warrior > MS", "MS > OS", "LC", "Healers > MS" }
     local function rollItem()
         local base = bases[math.random(#bases)]
         -- drop row: clickable bracket buttons + a roll countdown bar driven by the configured duration
-        local rollDur = (addon.db and addon.db.options and tonumber(addon.db.options.rollDuration)) or 20
-        return { link = base.link, icon = base.icon, quantity = 1, rollDuration = rollDur }
+        local rollDur = (addon.db and addon.db.options and tonumber(addon.db.options.rollDuration)) or 30
+        return { link = base.link, icon = base.icon, quantity = 1, rollDuration = rollDur,
+            prio = samplePrios[math.random(#samplePrios)] }
     end
 
     -- DROPS banner: a couple of items up for roll (dice medallion).
