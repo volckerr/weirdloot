@@ -211,7 +211,9 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
     -- "Name (Bracket), ...". winnerKeys lets the roll tooltip highlight the winners.
     local winnerKeys = {}
     local nameText
-    if data.prompt then
+    if data.rollDuration then
+        nameText = ""   -- roll-prompt row: the bracket buttons occupy this line
+    elseif data.prompt then
         nameText = data.prompt
     else
         local wins = data.winners
@@ -248,6 +250,14 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
 end
 
 local ROW_FADE_TIME = 0.4   -- seconds a row takes to fade out once its lifetime ends
+
+-- diagnostic: trace a drop row's lifecycle (add branch, dismiss, fade, revive, remove) into the
+-- existing debug log so `/wl debug dump` shows the show/hide timeline. Gated on the log being on.
+local function rbDbg(s)
+    if WeirdLootDebugLog and WeirdLootDebugLog.enabled then
+        addon:LogCoreEvent("rb", { id = s })
+    end
+end
 
 ------------------------------------------------------------------
 -- Banner factory. Each call builds an independent banner frame (chrome + animations + methods).
@@ -418,7 +428,12 @@ local function buildBanner(bannerName, medallionCfg)
         local rolls = self.rolls
         if rolls and #rolls > 0 then
             local winnerKeys = self.winnerKeys or {}
+            local prevSection
             for _, r in ipairs(rolls) do
+                if prevSection and r.section ~= prevSection then
+                    GameTooltip:AddLine(" ")   -- slight gap between bracket groups (rolls come priority-ordered)
+                end
+                prevSection = r.section
                 local right = r.roll and tostring(r.roll) or "-"
                 if r.section and r.section ~= "" then right = right .. "  " .. r.section end
                 if winnerKeys[util:NormalizeKey(r.name)] then
@@ -529,6 +544,7 @@ local function buildBanner(bannerName, medallionCfg)
         IconOverlay2:Hide()
 
         tinsert(parent.LootFrames, frame)
+        frame.__idx = #parent.LootFrames   -- stable id for diagnostics
 
         IconHitBox.UpdateTooltip = function(owner) BossBanner_OnLootItemEnter(owner) end
         IconHitBox:SetScript("OnEnter", BossBanner_OnLootItemEnter)
@@ -620,6 +636,41 @@ local function buildBanner(bannerName, medallionCfg)
         frame.RollTimer:SetMinMaxValues(0, 1)
         frame.RollTimer:SetValue(1)
         frame.RollTimer:Hide()
+
+        -- Bracket buttons for roll-prompt rows (hidden on awarded rows). Clicking selects a bracket;
+        -- the choice stays highlighted. (Wiring to the real roll response is the next step.)
+        local BRACKETS = { { "BiS", 30 }, { "MS", 28 }, { "MU", 30 }, { "OS", 28 }, { "TM", 28 }, { "Pass", 40 } }
+        frame.RollButtons = {}
+        local bx = 56
+        for _, b in ipairs(BRACKETS) do
+            local btn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+            btn:SetText(b[1])
+            btn:SetWidth(b[2])
+            btn:SetHeight(17)
+            btn:SetPoint("TOPLEFT", frame, "TOPLEFT", bx, -20)
+            btn.bracket = b[1]
+            btn:SetScript("OnClick", function(self)
+                if frame.selectedBracket == self.bracket then
+                    -- second click on the already-selected bracket: dismiss this roll (fade the row out)
+                    rbDbg(("DISMISS idx=%s rd=%s"):format(tostring(frame.__idx), tostring(frame.rollDuration)))
+                    frame.fading = true
+                    frame.fadeLeft = ROW_FADE_TIME
+                    frame.RollTimer:Hide()
+                    for _, b in ipairs(frame.RollButtons) do b:Hide() end
+                    return
+                end
+                for _, b in ipairs(frame.RollButtons) do
+                    b:UnlockHighlight()
+                    b:GetFontString():SetTextColor(1, 0.82, 0)   -- gold (default)
+                end
+                self:LockHighlight()
+                self:GetFontString():SetTextColor(0, 1, 0)       -- selected: green
+                frame.selectedBracket = self.bracket
+            end)
+            btn:Hide()
+            frame.RollButtons[#frame.RollButtons + 1] = btn
+            bx = bx + b[2] + 2
+        end
 
         return frame
     end
@@ -863,9 +914,9 @@ local function buildBanner(bannerName, medallionCfg)
     function addRow(self, data)
         if aliveRowCount(self) >= BB_MAX_LOOT then return end
         local additional = aliveRowCount(self) > 0   -- rows already shown => this is not the first item
-        local frame
+        local frame, reused
         for _, f in ipairs(self.LootFrames) do
-            if not f.alive and not f.fading then frame = f; break end
+            if not f.alive and not f.fading then frame = f; reused = true; break end
         end
         if not frame then frame = createLootFrame(self) end
         BossBanner_ConfigureLootFrame(frame, data)
@@ -877,17 +928,31 @@ local function buildBanner(bannerName, medallionCfg)
         if frame.Anim then frame.Anim:Play() end
         relayoutAliveRows(self)
         if data.rollDuration then
-            -- roll-prompt row: a fixed countdown of the roll timer, shown by its own bar. It does not
-            -- extend or get extended (each roll runs its own clock).
+            -- roll-prompt row: a fixed countdown of the roll timer + clickable bracket buttons. It does
+            -- not extend or get extended (each roll runs its own clock).
             frame.rollDuration = data.rollDuration
             frame.timeLeft = data.rollDuration
             frame.RollTimer:SetValue(1)
             frame.RollTimer:SetStatusBarColor(0, 1, 0.1)
             frame.RollTimer:Show()
+            frame.selectedBracket = nil
+            for _, btn in ipairs(frame.RollButtons) do
+                btn:SetAlpha(1)   -- a reused slot may carry a stale fade alpha from its previous life
+                btn:UnlockHighlight()
+                btn:GetFontString():SetTextColor(1, 0.82, 0)
+                btn:Show()
+            end
+            local b1 = frame.RollButtons[1]
+            rbDbg(("add-DROP idx=%s reused=%s b_own=%.2f b_eff=%.2f f_own=%.2f f_eff=%.2f"):format(
+                tostring(frame.__idx), tostring(reused), b1:GetAlpha(), b1:GetEffectiveAlpha(),
+                frame:GetAlpha(), frame:GetEffectiveAlpha()))
+            frame.__rbWatch = 0.35   -- one-shot re-check ~0.35s later
             return
         end
+        rbDbg(("add-WON idx=%s reused=%s rd=%s HIDE-buttons"):format(tostring(frame.__idx), tostring(reused), tostring(data.rollDuration)))
         frame.rollDuration = nil
         frame.RollTimer:Hide()
+        for _, btn in ipairs(frame.RollButtons) do btn:Hide() end
         -- Won row: full lifetime; each additional drop EXTENDS the (won) rows already shown by half
         -- (capped at full), reviving any that were mid-fade, so earlier items linger to be read.
         local full = resultHoldSeconds()
@@ -897,6 +962,7 @@ local function buildBanner(bannerName, medallionCfg)
                 if f.alive and f ~= frame and not f.rollDuration then
                     f.timeLeft = math.min(max(f.timeLeft, 0) + full / 2, full)
                     if f.fading then
+                        rbDbg(("REVIVE idx=%s rd=%s (no button re-show)"):format(tostring(f.__idx), tostring(f.rollDuration)))
                         f.fading = false
                         f.fadeLeft = 0
                         f:SetAlpha(1)
@@ -922,15 +988,33 @@ local function buildBanner(bannerName, medallionCfg)
                 if f.alive and not f.fading and not f.rollDuration then f.timeLeft = 2 end
             end
         end
+        for _, f in ipairs(self.LootFrames) do
+            if f.__rbWatch and f.alive then
+                f.__rbWatch = f.__rbWatch - elapsed
+                if f.__rbWatch <= 0 then
+                    f.__rbWatch = nil
+                    local b1 = f.RollButtons and f.RollButtons[1]
+                    if b1 then
+                        rbDbg(("watch-DROP idx=%s b_own=%.2f b_eff=%.2f f_own=%.2f f_eff=%.2f"):format(
+                            tostring(f.__idx), b1:GetAlpha(), b1:GetEffectiveAlpha(),
+                            f:GetAlpha(), f:GetEffectiveAlpha()))
+                    end
+                end
+            end
+        end
         local removed, stillCounting = false, 0
         for _, f in ipairs(self.LootFrames) do
             if f.alive then
                 if f.fading then
                     f.fadeLeft = f.fadeLeft - elapsed
                     if f.fadeLeft <= 0 then
+                        rbDbg(("RM idx=%s rd=%s"):format(tostring(f.__idx), tostring(f.rollDuration)))
                         f.alive = false
                         f.fading = false
+                        f:SetAlpha(1)   -- slot freed: restore base visual state for its next occupant
                         f:Hide()
+                        if f.RollTimer then f.RollTimer:Hide() end
+                        if f.RollButtons then for _, btn in ipairs(f.RollButtons) do btn:SetAlpha(1); btn:Hide() end end
                         removed = true
                     else
                         f:SetAlpha(f.fadeLeft / ROW_FADE_TIME)
@@ -938,6 +1022,7 @@ local function buildBanner(bannerName, medallionCfg)
                 else
                     f.timeLeft = f.timeLeft - elapsed
                     if f.timeLeft <= 0 then
+                        rbDbg(("FADE idx=%s rd=%s"):format(tostring(f.__idx), tostring(f.rollDuration)))
                         f.fading = true
                         f.fadeLeft = ROW_FADE_TIME
                         if f.rollDuration then f.RollTimer:Hide() end   -- roll time is up
@@ -979,6 +1064,7 @@ local function buildBanner(bannerName, medallionCfg)
         entry.duration = 86400
     end
     local function BossBanner_AnimBannerOut(self)
+        rbDbg(("OUT-start %s alive=%d"):format(bannerName, aliveRowCount(self)))
         self.AnimOut:Play()
     end
 
@@ -1013,6 +1099,7 @@ local function buildBanner(bannerName, medallionCfg)
 
     function BossBanner_OnAnimOutFinished(animOut)
         local banner = animOut:GetParent()
+        rbDbg(("OUT-done %s"):format(bannerName))
         banner.animState = nil
         if banner.showingTooltip then GameTooltip:Hide() end
         banner.showingTooltip = false
@@ -1025,6 +1112,8 @@ local function buildBanner(bannerName, medallionCfg)
             f.alive = false
             f.fading = false
             f:SetAlpha(1)
+            if f.RollTimer then f.RollTimer:Hide() end
+            if f.RollButtons then for _, btn in ipairs(f.RollButtons) do btn:SetAlpha(1); btn:Hide() end end
             f:Hide()
         end
         banner:SetHeight(banner.baseHeight)
@@ -1125,6 +1214,7 @@ local function buildBanner(bannerName, medallionCfg)
         if self.animState == BB_STATE_LOOT_INSERT then
             addRow(self, data)
         elseif self.animState == BB_STATE_BANNER_OUT then
+            rbDbg(("INTERRUPT %s alive=%d"):format(bannerName, aliveRowCount(self)))
             self.AnimOut:Stop()
             self:SetAlpha(1)
             self.animState = BB_STATE_LOOT_INSERT
@@ -1195,12 +1285,15 @@ local awardedBanner = buildBanner("WeirdLootAwardedBanner", { atlas = "LootBanne
 local dropsBanner = buildBanner("WeirdLootDropsBanner", { texture = DICE_TEXTURE })
 
 local REGION_TOP = -120
+-- positive pulls the awarded banner UP into the drops banner's bottom chrome reserve, closing the
+-- dead space between the last drop row and the awarded medallion. Tune to taste.
+local REGION_OVERLAP = 34
 local function layoutRegion()
     dropsBanner:ClearAllPoints()
     dropsBanner:SetPoint("TOP", UIParent, 0, REGION_TOP)
     awardedBanner:ClearAllPoints()
     if dropsBanner:IsShown() then
-        awardedBanner:SetPoint("TOP", dropsBanner, "BOTTOM", 0, -14)   -- below drops; moves as it resizes
+        awardedBanner:SetPoint("TOP", dropsBanner, "BOTTOM", 0, REGION_OVERLAP)   -- moves as drops resizes
     else
         awardedBanner:SetPoint("TOP", UIParent, 0, REGION_TOP)
     end
@@ -1272,13 +1365,23 @@ SlashCmdList["WLBANNER"] = function()
         end
         if math.random(2) == 1 then details[math.random(n)].isNamed = true end   -- ~half: one named roller
 
-        -- Breakdown (tooltip) via the REAL bracket sort; a named roller keeps its bracket spot but is
-        -- labelled "LC Prio".
+        -- Breakdown (tooltip) grouped and ordered by effective priority: LC (named) is its own top tier,
+        -- then BiS > MS > MU > OS, each group sorted by roll. A named roller shows under LC, not the
+        -- response bracket they happened to pick.
+        local priorityOrder = { "LC", "BiS", "MS", "MU", "OS" }
+        local groups = {}
+        for _, d in ipairs(details) do
+            local sec = d.isNamed and "LC" or LABEL[d.responseType]
+            groups[sec] = groups[sec] or {}
+            groups[sec][#groups[sec] + 1] = { name = d.name, class = classByName[d.name],
+                roll = tonumber(d.rollText), section = sec }
+        end
         local rolls = {}
-        for _, s in ipairs(addon:SectionsFromResult({ allRollerDetails = details })) do
-            for _, m in ipairs(s.members) do
-                rolls[#rolls + 1] = { name = m.name, class = classByName[m.name], roll = m.roll,
-                    section = m.isNamed and "LC Prio" or s.label }
+        for _, sec in ipairs(priorityOrder) do
+            local g = groups[sec]
+            if g then
+                table.sort(g, function(a, b) return (a.roll or 0) > (b.roll or 0) end)
+                for _, m in ipairs(g) do rolls[#rolls + 1] = m end
             end
         end
 
@@ -1299,18 +1402,16 @@ SlashCmdList["WLBANNER"] = function()
         for i = 1, math.min(quantity, #ranked) do
             local r = ranked[i]
             winners[i] = { name = r.name, class = r.class, roll = r.roll,
-                section = r.isNamed and "LC Prio" or LABEL[r.bracket] }
+                section = r.isNamed and "LC" or LABEL[r.bracket] }
         end
         return { link = base.link, icon = base.icon, quantity = quantity, winners = winners, rolls = rolls }
     end
 
     local function rollItem()
         local base = bases[math.random(#bases)]
-        -- prototype drop row: prio + bracket options as text (real clickable buttons are the next step),
-        -- and a roll countdown bar driven by the configured roll duration.
+        -- drop row: clickable bracket buttons + a roll countdown bar driven by the configured duration
         local rollDur = (addon.db and addon.db.options and tonumber(addon.db.options.rollDuration)) or 20
-        return { link = base.link, icon = base.icon, quantity = 1,
-            prompt = "Roll:  |cffffd200BiS|r  MS  MU  OS  TM  Pass", rollDuration = rollDur }
+        return { link = base.link, icon = base.icon, quantity = 1, rollDuration = rollDur }
     end
 
     -- DROPS banner: a couple of items up for roll (dice medallion).
