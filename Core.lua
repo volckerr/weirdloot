@@ -444,18 +444,44 @@ function addon:PLAYER_ENTERING_WORLD()
     self:ScheduleAuthorityRecheck()     -- catch ML status that lands after the data settles
 end
 
-function addon:RAID_ROSTER_UPDATE()
+-- Coalesce roster events. RAID_ROSTER_UPDATE / PARTY_MEMBERS_CHANGED fire in bursts (and more of them
+-- the larger the raid), and each one re-runs a full roster rebuild + loot-master re-resolution. Running
+-- that per event during churn is wasteful and, worse, a mid-burst GetRaidRosterInfo read can transiently
+-- misresolve the ML, which flaps authority and fires spurious sync requests / forced snapshots. Debounce
+-- onto a trailing deadline so the pipeline runs ONCE after the roster settles (also when the reads are
+-- consistent). The window is deliberately wider than the bag debounce: roster bursts run longer and this
+-- path is not latency-sensitive (nothing protected runs here).
+local ROSTER_SETTLE = 0.5
+local rosterDebounce = CreateFrame("Frame")
+rosterDebounce:Hide()
+rosterDebounce:SetScript("OnUpdate", function()
+    if not addon._rosterRefreshAt or GetTime() < addon._rosterRefreshAt then return end
+    addon._rosterRefreshAt = nil
+    rosterDebounce:Hide()
+    addon:RunRosterRefresh()
+end)
+
+-- Arm/re-arm the coalesced roster refresh. The deadline pushes forward on every new roster event, so the
+-- refresh lands ROSTER_SETTLE after the LAST event in a burst.
+function addon:ScheduleRosterRefresh()
+    self._rosterRefreshAt = GetTime() + ROSTER_SETTLE
+    rosterDebounce:Show()
+end
+
+-- The roster pipeline, run once per settled burst.
+function addon:RunRosterRefresh()
     self:RefreshRoster()
     self:RefreshLootAuthority()
     self:MaybeRecheckOnJoin()
     self:TriggerCallback("ROSTER_UPDATED")
 end
 
+function addon:RAID_ROSTER_UPDATE()
+    self:ScheduleRosterRefresh()
+end
+
 function addon:PARTY_MEMBERS_CHANGED()
-    self:RefreshRoster()
-    self:RefreshLootAuthority()
-    self:MaybeRecheckOnJoin()
-    self:TriggerCallback("ROSTER_UPDATED")
+    self:ScheduleRosterRefresh()
 end
 
 -- Being added to a raid mid-session does NOT fire PLAYER_ENTERING_WORLD, so the post-login auth-recheck
