@@ -21,6 +21,7 @@ local addon = WeirdLoot
 -- ---------------------------------------------------------------------------
 
 local DEFAULT_MAX = 5000
+local ALERT_THROTTLE = 5   -- seconds between repeat chat alerts of the same kind (anti-spam)
 
 local function ensureLog()
     WeirdLootDebugLog = WeirdLootDebugLog or {}
@@ -68,7 +69,7 @@ function addon:SyncAlert(key, text)
     if not log or not log.enabled or log.alerts == false then return end
     self._alertAt = self._alertAt or {}
     local now = (GetTime and GetTime()) or 0
-    if self._alertAt[key] and (now - self._alertAt[key]) < 5 then return end
+    if self._alertAt[key] and (now - self._alertAt[key]) < ALERT_THROTTLE then return end
     self._alertAt[key] = now
     self:Print("|cffff5050[WeirdLoot]|r " .. text .. " |cff808080-- /reload and have the logs checked.|r")
 end
