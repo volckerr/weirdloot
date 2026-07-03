@@ -29,7 +29,6 @@ H.test("ClassifySyncAnomaly flags real sync faults", function()
     H.notNil(addon:ClassifySyncAnomaly("recv-snap-stale", { rev = 3, lastRev = 9 }), "stale snapshot rejected")
     H.notNil(addon:ClassifySyncAnomaly("evict-partial", { sender = "ML", id = 4 }), "lost frame / partial")
     H.notNil(addon:ClassifySyncAnomaly("recv-decode-fail", { sender = "ML" }), "corrupt inbound")
-    H.notNil(addon:ClassifySyncAnomaly("handler-error", { label = "AutoBroadcastSession", err = "boom" }), "handler error")
     H.notNil(addon:ClassifySyncAnomaly("deliver-cb", { ok = false, itemId = 40001 }), "delivery matched no owed award")
 end)
 

@@ -54,8 +54,6 @@ function addon:ClassifySyncAnomaly(ev, d)
         return "an inbound message arrived corrupt / undecodable"
     elseif ev == "deliver-cb" and d.ok == false then
         return string.format("a delivered item matched no owed award (itemId %s)", tostring(d.itemId))
-    elseif ev == "handler-error" then
-        return "a ledger-change step errored (" .. tostring(d.label) .. "): " .. tostring(d.err)
     end
     return nil
 end
