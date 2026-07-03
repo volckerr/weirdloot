@@ -5,6 +5,7 @@ local UI = addon.UI
 local createTextWindow = UI.createTextWindow
 local sortGroupedRollers = UI.sortGroupedRollers
 local buildPlainCandidateSummary = UI.buildPlainCandidateSummary
+local formatSpecPriorityDisplay = UI.formatSpecPriorityDisplay
 
 function addon:BuildWinnersExportText()
     local lines = {}

@@ -187,11 +187,16 @@ function addon:InitializeSession()
     -- Subscribe once: any ledger change re-projects, persists the ledger, refreshes the UI, syncs.
     if self.lootCore and not self._lootCoreWired then
         self._lootCoreWired = true
+        -- Send and persist the authoritative ledger BEFORE the presentation work. The broadcast reads
+        -- only the core (BuildLotValue off each lot's own fields), never the loot projection or any UI,
+        -- so running it first means an error later while rebuilding projections or refreshing the UI can
+        -- never skip the sync send that keeps raiders current. Projections are rebuilt just before the UI
+        -- callback, since the tabs render from them.
         self.lootCore:On("ledgerChanged", function()
-            self:RebuildLootProjections()
-            self.lootCore:SaveTo(self.session)   -- keep the persisted ledger current
-            self:TriggerCallback("SESSION_UPDATED")
             if self:IsAuthorizedLootMaster() then self:AutoBroadcastSession() end
+            self.lootCore:SaveTo(self.session)   -- keep the persisted ledger current
+            self:RebuildLootProjections()
+            self:TriggerCallback("SESSION_UPDATED")
         end)
     end
     self:RebuildLootProjections()

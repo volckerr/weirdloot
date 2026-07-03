@@ -357,6 +357,13 @@ function Channel:_deliver(frames, sender, distribution)
         self:_log("recv-decode-fail", { sender = sender, err = value })
         return
     end
+    -- Symmetric with the per-frame "send" log in _pump: record every fully-reassembled inbound
+    -- message so the trace shows what actually ARRIVED (tag/sender/size), not only what a higher layer
+    -- chose to act on. This is the single fact that distinguishes a dead inbound (no recv records at
+    -- all) from traffic that arrived and was then ignored upstream.
+    local bytes = 0
+    for i = 1, #frames do bytes = bytes + #frames[i] end
+    self:_log("recv", { tag = (type(value) == "table" and value[1]) or nil, sender = sender, dist = distribution, bytes = bytes })
     if self.opts.onMessage then self.opts.onMessage(value, sender, distribution) end
 end
 

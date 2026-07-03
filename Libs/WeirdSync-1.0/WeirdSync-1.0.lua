@@ -90,7 +90,12 @@ function Channel:_emitSnapshot(dist, target, reqId)
     self.cb.buildSnapshot(function(lineFields)
         lines[#lines + 1] = lineFields
     end)
-    self:_send({ "SNAP", self.cb.epoch(), tostring(rev), reqId or "", lines }, dist, target)
+    -- The 6th field is our GENERATION (this process instance's nonce). Epoch says WHICH session;
+    -- generation says WHICH load of the authority produced it. rev resets to 0 on every reload/relog
+    -- while the epoch is restored unchanged, so a peer holding a higher rev would reject the restarted
+    -- authority's lower-rev snapshot as a same-epoch backslide forever. Carrying the generation lets the
+    -- peer tell "the authority restarted its counter" from "this is a stale old message" and rebaseline.
+    self:_send({ "SNAP", self.cb.epoch(), tostring(rev), reqId or "", lines, self.nonce }, dist, target)
     self._pending = {} -- a snapshot supersedes any queued deltas
 end
 
@@ -196,6 +201,7 @@ function Channel:OnReceive(sender, value)
             rev = tonumber(f[3]) or 0,
             reqId = (f[4] ~= "" and f[4]) or nil,
             lines = f[5] or {},
+            gen = f[6],
         }
         -- Epoch monotonicity: never adopt an OLDER session. Epochs are time()-stamped session ids, so
         -- a smaller epoch is a stale session -- an authority that restored a long-lived old session, or
@@ -219,16 +225,43 @@ function Channel:OnReceive(sender, value)
         -- authority stops retrying. A NEW epoch (session rebaseline) or a first-ever sync (lastRev == nil)
         -- always applies -- only a same-epoch backslide is rejected.
         local sameEpoch = (self.appliedEpoch ~= nil and inc.epoch == self.appliedEpoch)
-        if sameEpoch and self.lastRev ~= nil and inc.rev < self.lastRev then
+        -- Generation ORDERING within an epoch. The generation is a wall-clock time() minted per load, and
+        -- within a single epoch the authority is always the same client (a real handoff mints a NEW epoch),
+        -- so that client's generation only ever increases across its own reloads. Compare numerically:
+        --   newer gen (>) -> the authority reloaded and restarted rev at 0; rebaseline even past a lower
+        --                    rev, otherwise the stale-rev guard would refuse it until the PEER reloads.
+        --   older gen (<) -> a backlogged message from a SUPERSEDED load (e.g. a snapshot the ML sent just
+        --                    before relogging, delivered late). It must be REJECTED, or it regresses us to
+        --                    the pre-reload state at its high rev (which the stale-rev guard would not catch,
+        --                    since that rev is ABOVE our freshly-rebaselined one).
+        --   same gen      -> normal rev handling (the stale-rev backslide guard below).
+        -- The epoch guard above still protects against genuinely stale OLD sessions (different epoch); this
+        -- only orders the loads of one authority within one epoch. Non-numeric gens (legacy/absent) fall
+        -- through to plain rev handling, so it degrades safely.
+        local ig, ag = tonumber(inc.gen), tonumber(self.appliedGen)
+        local genRestart = sameEpoch and ig and ag and ig > ag
+        local genStale   = sameEpoch and ig and ag and ig < ag
+        if genStale then
+            self.pendingRequest = nil
+            self.cb.log("recv-snap-stale", { reason = "gen", gen = inc.gen, curGen = self.appliedGen })
+            if inc.reqId then self:_send({ "AK", inc.reqId }, "WHISPER", sender, "ALERT") end
+            return
+        end
+        if sameEpoch and not genRestart and self.lastRev ~= nil and inc.rev < self.lastRev then
             self.pendingRequest = nil
             self.cb.log("recv-snap-stale", { rev = inc.rev, lastRev = self.lastRev })
             if inc.reqId then self:_send({ "AK", inc.reqId }, "WHISPER", sender, "ALERT") end
             return
         end
+        local prevGen = self.appliedGen
         self.cb.applySnapshot(inc.lines, inc.epoch)
         self.lastRev = inc.rev      -- a snapshot re-baselines the revision
         self.appliedEpoch = inc.epoch
+        self.appliedGen = inc.gen or self.appliedGen   -- remember the authority's generation for restart detection
         self.pendingRequest = nil   -- our outstanding request (if any) is satisfied
+        if genRestart then
+            self.cb.log("gen-restart", { epoch = inc.epoch, rev = inc.rev, was = prevGen, now = inc.gen })
+        end
         self.cb.log("recv-snap", { rev = inc.rev, lines = #inc.lines })
         if inc.reqId then
             -- confirm a TARGETED snapshot was applied so the authority can stop retrying.
@@ -274,13 +307,31 @@ function Channel:OnReceive(sender, value)
         if self.cb.isAuthority() then return end
         local epoch = f[2]
         local rev = tonumber(f[3]) or 0
+        local gen = f[4]
         -- Epoch monotonicity (mirrors the SNAP guard): a heartbeat from an OLDER session is a stale
         -- authority -- ignore it, never resync backward. A newer epoch is a fresh session we have not
         -- adopted (we ARE behind, pull it). Same epoch: behind only if its rev has moved past ours.
         local incE, curE = tonumber(epoch), tonumber(self.appliedEpoch)
-        if incE and curE and incE < curE then return end
+        local ig, ag = tonumber(gen), tonumber(self.appliedGen)
+        local sameEpoch = (epoch == self.appliedEpoch)
+        local staleEpoch = incE and curE and incE < curE
         local epochChanged = epoch and epoch ~= "" and epoch ~= self.appliedEpoch
-        local behind = self.lastRev == nil or rev > self.lastRev or epochChanged
+        -- Generation ordering (mirrors the SNAP handler). A NEWER generation at the same epoch means the
+        -- authority reloaded and its rev is now below ours, so the rev test would read "in-sync" and never
+        -- heal -- treat it as behind so we pull a rebaselining snapshot. An OLDER generation is a heartbeat
+        -- from a superseded load; ignore it (like an older epoch) so a late straggler cannot bounce us.
+        local staleGen = sameEpoch and ig and ag and ig < ag
+        local genRestart = sameEpoch and ig and ag and ig > ag
+        local behind = self.lastRev == nil or rev > self.lastRev or epochChanged or genRestart
+        -- Log EVERY heartbeat we actually receive, with its verdict, so an in-sync heartbeat (which
+        -- takes no action) is not silent in the trace. Without this, "peer received the heartbeat and
+        -- ignored it as in-sync" and "peer never received the heartbeat (dead inbound)" are identical
+        -- in the log -- both leave no record -- which is exactly the ambiguity a stall diagnosis needs
+        -- resolved. recv-hb present + no recv-hb-gap == in-sync; recv-hb absent == never arrived.
+        self.cb.log("recv-hb", { rev = rev, lastRev = self.lastRev, epoch = epoch,
+            verdict = staleEpoch and "stale-epoch" or staleGen and "stale-gen" or genRestart and "gen-restart"
+                or (behind and (self.pendingRequest and "behind-pending" or "behind") or "in-sync") })
+        if staleEpoch or staleGen then return end
         if behind and not self.pendingRequest then
             self.cb.log("recv-hb-gap", { rev = rev, lastRev = self.lastRev, epoch = epoch })
             self:RequestSync()
@@ -299,7 +350,7 @@ function Channel:Tick(t)
     if self.cfg.heartbeat > 0 and self.cb.isAuthority() then
         local epoch = self.cb.epoch()
         if epoch and epoch ~= "" and t >= (self._nextHeartbeat or 0) then
-            self:_send({ "H", epoch, tostring(self.rev) }, "RAID")
+            self:_send({ "H", epoch, tostring(self.rev), self.nonce }, "RAID")   -- 4th field: generation (see _emitSnapshot)
             self._nextHeartbeat = t + self.cfg.heartbeat
         end
     end
@@ -387,14 +438,20 @@ function WeirdSync:NewChannel(prefix, cb)
     }
     ch.rev = 0
     ch.lastRev = nil
+    ch.appliedEpoch = nil   -- peer: the epoch of the last applied snapshot (session identity)
+    ch.appliedGen = nil     -- peer: the generation (authority process instance) of the last applied snapshot
     ch.outstanding = {}     -- authority: reqId -> { target, attempts, nextAttempt }
     ch.pendingRequest = nil -- peer: { reqId, attempts, nextAttempt }
     ch._pending = {}        -- authority: queued changed lines awaiting Broadcast
     ch.reqSeq = 0
     ch.me = cb.selfName or (UnitName and UnitName("player")) or "?"
     ch.meKey = normName(ch.me)
-    -- per-channel-instance nonce so reqIds are unique across reloads (GetTime keeps climbing
-    -- across a /reload, so each channel lifetime gets a distinct value). Injectable for tests.
+    -- per-channel-instance nonce, distinct for every load of this client. Two jobs: it keeps reqIds
+    -- unique across reloads, and it is the GENERATION stamped on SNAP/H so a peer can tell that the
+    -- authority restarted (and reset its rev) rather than that a message is stale. It only has to
+    -- DIFFER between two loads, not be ordered -- a peer compares gen ~= appliedGen. The host injects a
+    -- wall-clock time() (never resets, and two loads of one client are always seconds apart, so it is
+    -- unique per load); the GetTime fallback keeps it working out-of-game and in tests.
     ch.nonce = cb.nonce or tostring(math.floor(now()))
 
     -- Transport is the host's (cb.send + feeding OnReceive); WeirdSync does not own a channel.

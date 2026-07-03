@@ -21,6 +21,7 @@ local addon = WeirdLoot
 -- ---------------------------------------------------------------------------
 
 local DEFAULT_MAX = 5000
+local ALERT_THROTTLE = 5   -- seconds between repeat chat alerts of the same kind (anti-spam)
 
 local function ensureLog()
     WeirdLootDebugLog = WeirdLootDebugLog or {}
@@ -30,6 +31,45 @@ local function ensureLog()
     log.seq = log.seq or 0
     log.records = log.records or {}
     return log
+end
+
+-- Pure: map a trace record to a human alert string, or nil if the event is not an anomaly worth
+-- surfacing. Kept free of Print/throttle/frame state so it is unit-testable and so both the live
+-- LogCoreEvent path and any future consumer classify identically. The set is deliberately curated to
+-- events that each signal a REAL sync fault, not routine traffic.
+function addon:ClassifySyncAnomaly(ev, d)
+    d = d or {}
+    if ev == "give-up" then
+        return string.format("sync recovery gave up (%s/%s) -- your view may be stale",
+            tostring(d.kind or "?"), tostring(d.reason or "?"))
+    elseif ev == "drop-foreign" then
+        return string.format("dropped inbound %s from %s (loot master not resolved to that sender)",
+            tostring(d.t), tostring(d.from))
+    elseif ev == "recv-snap-stale" then
+        return string.format("rejected a stale snapshot (rev %s, holding %s)",
+            tostring(d.rev), tostring(d.lastRev))
+    elseif ev == "evict-partial" then
+        return "an inbound message never fully arrived (a frame was lost)"
+    elseif ev == "recv-decode-fail" then
+        return "an inbound message arrived corrupt / undecodable"
+    elseif ev == "deliver-cb" and d.ok == false then
+        return string.format("a delivered item matched no owed award (itemId %s)", tostring(d.itemId))
+    end
+    return nil
+end
+
+-- Print a throttled, colored anomaly line the MOMENT a bad case occurs, so the user knows to grab
+-- logs instead of finding out later from a dump. Per-key throttle keeps a burst (e.g. repeated
+-- drop-foreign) from flooding chat. Gated on debug + alerts (alerts default ON whenever debug is on;
+-- a nil alerts field means on, only an explicit `alerts off` mutes it).
+function addon:SyncAlert(key, text)
+    local log = WeirdLootDebugLog
+    if not log or not log.enabled or log.alerts == false then return end
+    self._alertAt = self._alertAt or {}
+    local now = (GetTime and GetTime()) or 0
+    if self._alertAt[key] and (now - self._alertAt[key]) < ALERT_THROTTLE then return end
+    self._alertAt[key] = now
+    self:Print("|cffff5050[WeirdLoot]|r " .. text .. " |cff808080-- /reload and have the logs checked.|r")
 end
 
 -- Append one record. data fields are merged in flat. Tables passed in (awards,
@@ -57,9 +97,60 @@ function addon:LogCoreEvent(ev, data)
         log.records = keep
     end
 
+    -- Inbound liveness: the transport logs a "recv" for every COMPLETE message that arrives, so the
+    -- last recv time is the heartbeat-of-life for our inbound channel (CheckInboundStall reads it). A
+    -- recv also clears a standing stall alert so a recovered inbound re-arms a fresh warning later.
+    if ev == "recv" then
+        self._lastInbound = rec.t
+        self._lastStallAlert = nil
+    end
+
+    -- Live anomaly alerts (option 1): a bad case announces itself in chat the moment it is logged.
+    if log.alerts ~= false then
+        local text = self:ClassifySyncAnomaly(ev, rec)
+        if text then self:SyncAlert(ev, text) end
+    end
+
     if log.verbose then
         self:Print("|cff888888[core]|r " .. ev .. (data and data.id and (" " .. tostring(data.id)) or ""))
     end
+end
+
+-- Inbound-silence watchdog (option 2): alerts can only fire on events that HAPPEN, but a dead inbound
+-- is the ABSENCE of events. A healthy raider hears an authority heartbeat every 30s, so if we hold an
+-- active session with a resolved loot master yet have received nothing for STALL_AFTER, the inbound is
+-- almost certainly stalled. Only meaningful for a raider (the ML sends, it does not receive).
+local STALL_AFTER = 60          -- 2 missed heartbeats (heartbeat is 30s)
+function addon:CheckInboundStall()
+    local log = WeirdLootDebugLog
+    if not log or not log.enabled or log.alerts == false then return end
+    if self:IsAuthorizedLootMaster() then return end                 -- the ML sends; it does not receive
+    local session = self.session
+    if not (session and session.active) then return end              -- only while we actually hold a session
+    local ml = self:GetLootMasterName()
+    if not ml or ml == "" then return end                            -- and only once the ML is resolved
+    local now = (GetTime and GetTime()) or 0
+    local last = self._lastInbound or now
+    if (now - last) <= STALL_AFTER then return end
+    if self._lastStallAlert and (now - self._lastStallAlert) < STALL_AFTER then return end
+    self._lastStallAlert = now
+    self:SyncAlert("stall", string.format(
+        "no inbound from the loot master in %ds (heartbeat is 30s) -- inbound looks stalled; /reload to recover",
+        math.floor(now - last)))
+end
+
+-- Drive the watchdog off a light periodic tick (self-contained; the whole check is a cheap no-op
+-- unless debug + alerts are on and we are a raider holding a session).
+local WATCH_PERIOD = 5
+local watchFrame = CreateFrame and CreateFrame("Frame")
+if watchFrame then
+    watchFrame.elapsed = 0
+    watchFrame:SetScript("OnUpdate", function(self, dt)
+        self.elapsed = self.elapsed + (dt or 0)
+        if self.elapsed < WATCH_PERIOD then return end
+        self.elapsed = 0
+        addon:CheckInboundStall()
+    end)
 end
 
 -- Insert a labeled marker. Use before each in-game test scenario to delimit it:
@@ -86,6 +177,9 @@ end
 -- Wire the core sink. Call early in PLAYER_LOGIN, before any module touches the core.
 function addon:InitializeDebug()
     local log = ensureLog()
+    -- Seed the inbound clock so the stall watchdog measures from now, not from epoch 0 (which would
+    -- false-alarm on the very first tick before any traffic).
+    self._lastInbound = (GetTime and GetTime()) or 0
     if not self.lootCore then return end
 
     if log.enabled then
@@ -134,17 +228,31 @@ function addon:HandleDebugCommand(rest)
 
     if verb == "" then
         self:Print("Core debug trace (off by default; turn it on once and the setting persists). Commands:")
-        self:Print("  on / off: start or stop tracing.   status: state and record count.")
+        self:Print("  on / off: start or stop tracing.   status: state and record count.   alerts on/off: live chat warnings on bad cases (default on with debug).")
         self:Print("  mark <label>: insert a marker for easier log chasing.   dump [n]: show last n records (default 12).   clear: wipe it.")
         self:Print("  sync: force a session sync.   drop <n>: (test) drop the next N sync sends.")
     elseif verb == "status" then
         local drop = self._syncDropCount or 0
-        self:Print(string.format("Core debug log: %s, %d record(s), seq %d, cap %d.%s",
-            log.enabled and "ON" or "OFF", #log.records, log.seq or 0, log.max or DEFAULT_MAX,
+        self:Print(string.format("Core debug log: %s, alerts %s, %d record(s), seq %d, cap %d.%s",
+            log.enabled and "ON" or "OFF", (log.alerts == false) and "OFF" or "ON",
+            #log.records, log.seq or 0, log.max or DEFAULT_MAX,
             drop > 0 and (" Dropping next " .. drop .. " sync msg(s).") or ""))
+        if self._lastInbound then
+            local age = math.floor(((GetTime and GetTime()) or 0) - self._lastInbound)
+            self:Print(string.format("Last inbound sync message: %ds ago (a raider should hear a heartbeat every 30s).", age))
+        end
         if self.comm and self.comm.SendRate then
             self:Print(string.format("WeirdComm send rate: %d msg this second (mute risk >= %d, server limit 100).",
                 self.comm:SendRate(), self.comm.muteWarn or 80))
+        end
+    elseif verb == "alerts" then
+        local a = string.lower(arg or "")
+        if a == "off" then
+            log.alerts = false
+            self:Print("Live sync alerts OFF (tracing continues).")
+        else
+            log.alerts = nil   -- nil == default on when debug is enabled
+            self:Print("Live sync alerts ON: bad cases print in chat as they happen.")
         end
     elseif verb == "on" then
         log.enabled = true

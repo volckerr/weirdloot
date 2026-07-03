@@ -87,6 +87,7 @@ local function newClient(S, name, opts)
         selfName = opts.selfName,
         rate = opts.rate, burst = opts.burst,
         compressMin = opts.compressMin, partialTimeout = opts.partialTimeout,
+        log = opts.log,
     })
     S:register(name, ch)
     return ch, inbox
@@ -121,6 +122,36 @@ test("round-trips a rich table ML->raider over RAID", function()
     ok(deepeq(rinbox[1].value, snap), "payload deep-equals original")
     ok(rinbox[1].sender == "Masterlooter", "sender preserved")
     ok(S.rejects == 0, "no frame exceeded the 255B cap")
+end)
+
+test("every reassembled inbound message logs one transport recv", function()
+    local S = newServer()
+    local events = {}
+    local ml = newClient(S, "Masterlooter")
+    local _, rinbox = newClient(S, "Raider", { log = function(ev, data) events[#events + 1] = { ev = ev, data = data or {} } end })
+    ml:Send({ "H", "S1", "7" }, "RAID")                                  -- single-frame
+    ml:Send({ "SNAP", "S1", "8", "", { blob = rndBytes(3 * FP, 5) } }, "RAID")  -- multi-frame (incompressible)
+    S.now = S.now + 1; ml:Tick(S.now)                                    -- drain the pacer
+    local recvs = {}
+    for _, e in ipairs(events) do if e.ev == "recv" then recvs[#recvs + 1] = e.data end end
+    ok(#recvs == 2, "one recv per COMPLETE message, not per frame (got " .. #recvs .. ")")
+    ok(recvs[1].tag == "H" and recvs[1].sender == "Masterlooter" and recvs[1].dist == "RAID", "recv carries tag/sender/dist")
+    ok((recvs[2].bytes or 0) > FP, "multi-frame message logs one recv with the summed byte count")
+    ok(#rinbox == 2, "both messages still delivered to onMessage")
+end)
+
+test("a decode failure logs recv-decode-fail, not a recv", function()
+    local S = newServer()
+    local events = {}
+    local _, inbox = newClient(S, "R", { log = function(ev, data) events[#events + 1] = { ev = ev, data = data or {} } end })
+    local R = S.clients["R"]
+    R:OnReceive(PREFIX, "00" .. "01" .. "01" .. "0" .. "!!garbage!!", "RAID", "X")  -- valid header, corrupt body
+    local recv, fail = 0, 0
+    for _, e in ipairs(events) do
+        if e.ev == "recv" then recv = recv + 1 elseif e.ev == "recv-decode-fail" then fail = fail + 1 end
+    end
+    ok(fail == 1 and recv == 0, "a corrupt message logs the failure and never a success recv")
+    ok(#inbox == 0, "nothing delivered upstream")
 end)
 
 test("WHISPER reaches only the target, not the whole raid", function()
