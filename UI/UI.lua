@@ -205,6 +205,7 @@ local function formatSpecPriorityDisplay(specPriorityText)
 
     return table.concat(tiers, "\n---\n")
 end
+addon.UI.formatSpecPriorityDisplay = formatSpecPriorityDisplay
 
 local function createScrollList(parent, name, rowCount, initializer)
     local frame = createBackdropFrame(name, parent)
