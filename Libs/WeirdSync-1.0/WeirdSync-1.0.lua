@@ -225,13 +225,28 @@ function Channel:OnReceive(sender, value)
         -- authority stops retrying. A NEW epoch (session rebaseline) or a first-ever sync (lastRev == nil)
         -- always applies -- only a same-epoch backslide is rejected.
         local sameEpoch = (self.appliedEpoch ~= nil and inc.epoch == self.appliedEpoch)
-        -- Authority restart: a snapshot at the SAME epoch but a DIFFERENT generation means the authority
-        -- reloaded/relogged and restarted its rev at 0. Its lower rev is legitimate, not a backslide, so
-        -- the stale-rev guard below must NOT reject it -- otherwise every message from the restarted
-        -- authority is refused until the PEER reloads. The epoch is unchanged, so stale-old-session
-        -- protection (the epoch guard above) is untouched: a genuinely stale session is a different,
-        -- older epoch and is still rejected. Only same-epoch + changed-generation rebaselines here.
-        local genRestart = sameEpoch and inc.gen and self.appliedGen and inc.gen ~= self.appliedGen
+        -- Generation ORDERING within an epoch. The generation is a wall-clock time() minted per load, and
+        -- within a single epoch the authority is always the same client (a real handoff mints a NEW epoch),
+        -- so that client's generation only ever increases across its own reloads. Compare numerically:
+        --   newer gen (>) -> the authority reloaded and restarted rev at 0; rebaseline even past a lower
+        --                    rev, otherwise the stale-rev guard would refuse it until the PEER reloads.
+        --   older gen (<) -> a backlogged message from a SUPERSEDED load (e.g. a snapshot the ML sent just
+        --                    before relogging, delivered late). It must be REJECTED, or it regresses us to
+        --                    the pre-reload state at its high rev (which the stale-rev guard would not catch,
+        --                    since that rev is ABOVE our freshly-rebaselined one).
+        --   same gen      -> normal rev handling (the stale-rev backslide guard below).
+        -- The epoch guard above still protects against genuinely stale OLD sessions (different epoch); this
+        -- only orders the loads of one authority within one epoch. Non-numeric gens (legacy/absent) fall
+        -- through to plain rev handling, so it degrades safely.
+        local ig, ag = tonumber(inc.gen), tonumber(self.appliedGen)
+        local genRestart = sameEpoch and ig and ag and ig > ag
+        local genStale   = sameEpoch and ig and ag and ig < ag
+        if genStale then
+            self.pendingRequest = nil
+            self.cb.log("recv-snap-stale", { reason = "gen", gen = inc.gen, curGen = self.appliedGen })
+            if inc.reqId then self:_send({ "AK", inc.reqId }, "WHISPER", sender, "ALERT") end
+            return
+        end
         if sameEpoch and not genRestart and self.lastRev ~= nil and inc.rev < self.lastRev then
             self.pendingRequest = nil
             self.cb.log("recv-snap-stale", { rev = inc.rev, lastRev = self.lastRev })
@@ -297,12 +312,16 @@ function Channel:OnReceive(sender, value)
         -- authority -- ignore it, never resync backward. A newer epoch is a fresh session we have not
         -- adopted (we ARE behind, pull it). Same epoch: behind only if its rev has moved past ours.
         local incE, curE = tonumber(epoch), tonumber(self.appliedEpoch)
+        local ig, ag = tonumber(gen), tonumber(self.appliedGen)
+        local sameEpoch = (epoch == self.appliedEpoch)
         local staleEpoch = incE and curE and incE < curE
         local epochChanged = epoch and epoch ~= "" and epoch ~= self.appliedEpoch
-        -- Same-epoch generation change: the authority restarted (reload/relog) and its rev is now BELOW
-        -- ours, so the rev test would read "in-sync" and never heal. Treat a changed generation as behind
-        -- so we pull a snapshot, which rebaselines us to the restarted authority's rev.
-        local genRestart = gen and self.appliedGen and gen ~= self.appliedGen and (epoch == self.appliedEpoch)
+        -- Generation ordering (mirrors the SNAP handler). A NEWER generation at the same epoch means the
+        -- authority reloaded and its rev is now below ours, so the rev test would read "in-sync" and never
+        -- heal -- treat it as behind so we pull a rebaselining snapshot. An OLDER generation is a heartbeat
+        -- from a superseded load; ignore it (like an older epoch) so a late straggler cannot bounce us.
+        local staleGen = sameEpoch and ig and ag and ig < ag
+        local genRestart = sameEpoch and ig and ag and ig > ag
         local behind = self.lastRev == nil or rev > self.lastRev or epochChanged or genRestart
         -- Log EVERY heartbeat we actually receive, with its verdict, so an in-sync heartbeat (which
         -- takes no action) is not silent in the trace. Without this, "peer received the heartbeat and
@@ -310,9 +329,9 @@ function Channel:OnReceive(sender, value)
         -- in the log -- both leave no record -- which is exactly the ambiguity a stall diagnosis needs
         -- resolved. recv-hb present + no recv-hb-gap == in-sync; recv-hb absent == never arrived.
         self.cb.log("recv-hb", { rev = rev, lastRev = self.lastRev, epoch = epoch,
-            verdict = staleEpoch and "stale-epoch" or genRestart and "gen-restart"
+            verdict = staleEpoch and "stale-epoch" or staleGen and "stale-gen" or genRestart and "gen-restart"
                 or (behind and (self.pendingRequest and "behind-pending" or "behind") or "in-sync") })
-        if staleEpoch then return end
+        if staleEpoch or staleGen then return end
         if behind and not self.pendingRequest then
             self.cb.log("recv-hb-gap", { rev = rev, lastRev = self.lastRev, epoch = epoch })
             self:RequestSync()

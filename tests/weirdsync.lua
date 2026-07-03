@@ -650,11 +650,11 @@ test("every received heartbeat is logged with its verdict (in-sync vs behind)", 
     check(countEv(rd, "recv-hb-gap") >= 1, "a behind heartbeat drives the resync path")
 end)
 
-test("authority restart at the same epoch (rev reset) rebaselines the peer instead of rejecting", function()
+test("a NEWER generation at the same epoch (rev reset) rebaselines the peer instead of rejecting", function()
     reset()
     local ml = makeHost("ML", true, { epoch = "S1" })
     local rd = makeHost("R", false, { epoch = "S1" })
-    ml.chan.nonce = "genA"
+    ml.chan.nonce = "1000"                          -- generations are wall-clock stamps: numeric, ordered
 
     -- get the peer in sync and up to a high rev via a snapshot then deltas
     setLine(ml, "K1", "v1")
@@ -662,18 +662,18 @@ test("authority restart at the same epoch (rev reset) rebaselines the peer inste
     for i = 2, 6 do deltaChange(ml, "K" .. i, "v" .. i) end
     settle()
     eq(rd.chan.appliedEpoch, "S1", "peer synced to S1")
-    eq(rd.chan.appliedGen, "genA", "peer recorded the authority's generation")
+    eq(rd.chan.appliedGen, "1000", "peer recorded the authority's generation")
     local highRev = rd.chan.lastRev
     check(highRev and highRev >= 6, "peer is at a high rev before the restart (" .. tostring(highRev) .. ")")
 
-    -- ML reloads: rev restarts at 0, SAME session epoch, NEW generation, a fresh ledger
+    -- ML reloads: rev restarts at 0, SAME session epoch, NEWER generation, a fresh ledger
     ml.chan.rev = 0
-    ml.chan.nonce = "genB"
+    ml.chan.nonce = "2000"
     ml.store = { ["FRESH"] = { "FRESH", "post-reload" } }
     ml.chan:Broadcast(true); deliver()
 
     eq(rd.chan.lastRev, 1, "peer rebaselined to the restarted authority's low rev")
-    eq(rd.chan.appliedGen, "genB", "peer adopted the new generation")
+    eq(rd.chan.appliedGen, "2000", "peer adopted the new generation")
     check(rd.store["FRESH"] ~= nil and rd.store["K1"] == nil, "peer took the restarted authority's ledger")
     check(countEv(rd, "gen-restart") >= 1, "logged the generation restart")
     eq(countEv(rd, "recv-snap-stale"), 0, "the restarted authority's low-rev snapshot was NOT rejected as stale")
@@ -683,7 +683,7 @@ test("a same-generation lower-rev snapshot is still rejected as a stale backslid
     reset()
     local ml = makeHost("ML", true, { epoch = "S1" })
     local rd = makeHost("R", false, { epoch = "S1" })
-    ml.chan.nonce = "genA"
+    ml.chan.nonce = "1000"
 
     setLine(ml, "K1", "v1")
     ml.chan:Broadcast(true); settle()
@@ -697,6 +697,34 @@ test("a same-generation lower-rev snapshot is still rejected as a stale backslid
     eq(rd.chan.lastRev, high, "peer did not regress on a same-generation lower-rev snapshot")
     check(countEv(rd, "recv-snap-stale") >= 1, "same-generation backslide still rejected as stale")
     eq(countEv(rd, "gen-restart"), 0, "no false generation-restart on the same generation")
+end)
+
+test("a backlogged snapshot from an OLDER generation is rejected (no regression)", function()
+    reset()
+    local ml = makeHost("ML", true, { epoch = "S1" })
+    local rd = makeHost("R", false, { epoch = "S1" })
+
+    -- peer is synced to the CURRENT load (generation 2000) at a low rev after a restart
+    ml.chan.nonce = "2000"
+    ml.chan.rev = 0
+    ml.store = { ["CUR"] = { "CUR", "current" } }
+    ml.chan:Broadcast(true); deliver()
+    eq(rd.chan.appliedGen, "2000", "peer is on the current generation")
+    local curRev = rd.chan.lastRev
+
+    -- a straggler snapshot from the PREVIOUS load (generation 1000) arrives late at a HIGH rev. Its rev
+    -- is ABOVE the peer's freshly-rebaselined rev, so the rev guard would NOT catch it; only generation
+    -- ordering rejects it. Without that, it would regress the peer to the pre-reload ledger.
+    ml.chan.nonce = "1000"
+    ml.chan.rev = 62
+    ml.store = { ["OLD"] = { "OLD", "pre-reload" } }
+    ml.chan:Broadcast(true); deliver()
+
+    eq(rd.chan.lastRev, curRev, "peer did not regress to the older generation's rev")
+    eq(rd.chan.appliedGen, "2000", "peer kept the current generation")
+    check(rd.store["CUR"] ~= nil and rd.store["OLD"] == nil, "peer kept the current ledger, ignored the straggler")
+    check(countEv(rd, "recv-snap-stale", function(d) return d.reason == "gen" end) >= 1,
+        "older-generation snapshot rejected on the generation")
 end)
 
 -- ===========================================================================
