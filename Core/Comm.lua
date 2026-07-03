@@ -74,6 +74,10 @@ function addon:InitializeComm()
     -- framing, gap detection + resync, request retry, targeted-send ack, and give-up. It is transport
     -- agnostic: we hand it cb.send (route to the shared channel) and feed inbound via RouteComm.
     self.syncChannel = WeirdSync:NewChannel(self.syncPrefix, {
+        -- Generation for this load: a wall-clock stamp, unique per client load (a reload/relog is always
+        -- seconds apart and time() never resets), so a raider can tell an ML that just reloaded (rev back
+        -- to 0, same session epoch) from a stale message, and rebaselines instead of rejecting it.
+        nonce          = tostring((time and time()) or (GetTime and GetTime()) or 0),
         send           = function(value, dist, target, prio) self.comm:Send(value, dist, target, prio) end,
         isAuthority    = function() return self:IsAuthorizedLootMaster() end,
         authorityName  = function() return self:GetLootMasterName() end,

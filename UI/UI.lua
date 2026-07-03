@@ -419,6 +419,21 @@ function addon:RefreshUI()
     local lootMasterName = self:GetLootMasterName() or "Unknown"
     local authority = self:IsAuthorizedLootMaster() and "Yes" or "No"
     local sessionState = session.active and ("Active session " .. (session.id or "")) or "No active session"
+    -- With debug on, surface this client's live sync revision and generation (nonce) next to the session
+    -- id, so a desync is visible at a glance. The values are role-appropriate but share the same labels,
+    -- so the ML's screen and a raider's screen compare directly: the ML shows its OUTGOING rev + its own
+    -- nonce; a raider shows its APPLIED rev + the ML generation it is synced to. When they disagree at the
+    -- same session id (e.g. ML rev 1 after a relog vs raider rev 63), the desync reads straight off.
+    if WeirdLootDebugLog and WeirdLootDebugLog.enabled and self.syncChannel then
+        local ch = self.syncChannel
+        local rev, nonce
+        if self:IsAuthorizedLootMaster() then
+            rev, nonce = ch.rev, ch.nonce           -- authority: outgoing revision + own generation
+        else
+            rev, nonce = ch.lastRev, ch.appliedGen  -- peer: applied revision + the ML generation it is synced to
+        end
+        sessionState = sessionState .. string.format(" |cff888888[rev %s / nonce %s]|r", tostring(rev), tostring(nonce))
+    end
     self.ui.status:SetText(string.format("Loot master: %s | Authorized: %s | %s", lootMasterName, authority, sessionState))
 
     self:RefreshLootTab()

@@ -187,11 +187,27 @@ function addon:InitializeSession()
     -- Subscribe once: any ledger change re-projects, persists the ledger, refreshes the UI, syncs.
     if self.lootCore and not self._lootCoreWired then
         self._lootCoreWired = true
+        -- Each step runs isolated (option 3): a throw in the projection rebuild or the UI refresh must
+        -- NEVER skip the authoritative broadcast below it. That silent starvation -- ledger mutated on
+        -- the ML but never sent, so no rev bump ever heals a raider's stale mirror -- is precisely the
+        -- class of stuck-owe bug we are hunting. A failing step is reported as a handler-error trace
+        -- event (surfaced by the debug alert path) and still raised to the normal error handler, but it
+        -- can no longer starve sync.
+        local function guarded(label, fn)
+            local ok, err = pcall(fn)
+            if not ok then
+                self:LogCoreEvent("handler-error", { label = label, err = tostring(err) })
+                local h = geterrorhandler and geterrorhandler()
+                if h then h(err) end
+            end
+        end
         self.lootCore:On("ledgerChanged", function()
-            self:RebuildLootProjections()
-            self.lootCore:SaveTo(self.session)   -- keep the persisted ledger current
-            self:TriggerCallback("SESSION_UPDATED")
-            if self:IsAuthorizedLootMaster() then self:AutoBroadcastSession() end
+            guarded("RebuildLootProjections", function() self:RebuildLootProjections() end)
+            guarded("SaveTo", function() self.lootCore:SaveTo(self.session) end)   -- keep the persisted ledger current
+            guarded("SESSION_UPDATED", function() self:TriggerCallback("SESSION_UPDATED") end)
+            if self:IsAuthorizedLootMaster() then
+                guarded("AutoBroadcastSession", function() self:AutoBroadcastSession() end)
+            end
         end)
     end
     self:RebuildLootProjections()

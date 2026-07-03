@@ -627,6 +627,78 @@ test("a snapshot from an OLDER session (smaller epoch) is rejected; a newer one 
     check(rd.store["FRESH"] ~= nil and rd.store["NEW"] == nil, "ledger replaced by the new session")
 end)
 
+test("every received heartbeat is logged with its verdict (in-sync vs behind)", function()
+    reset()
+    local ml = makeHost("ML", true)
+    local rd = makeHost("R", false)
+    -- bring the peer fully in sync
+    setLine(ml, "A", "v1")
+    ml.chan:Broadcast(true); settle()
+
+    -- an in-sync heartbeat takes no action but MUST still leave a record, so that "received and
+    -- ignored" is distinguishable from "never arrived" (a dead inbound leaves no recv-hb at all).
+    ml.chan:Tick(1030); deliver()
+    check(countEv(rd, "recv-hb", function(d) return d.verdict == "in-sync" end) >= 1, "in-sync heartbeat logged with verdict in-sync")
+    eq(countEv(rd, "recv-hb-gap"), 0, "an in-sync heartbeat triggers no resync")
+
+    -- advance the authority and DROP the delta, so only the heartbeat can reveal the peer is behind
+    setLine(ml, "B", "v2")
+    ml.chan:NotifyChanged({ ml.store["B"] }); ml.chan:Broadcast(false)
+    clearWire()                                   -- the delta is lost on the wire
+    ml.chan:Tick(1070); deliver()                 -- next heartbeat carries the higher rev
+    check(countEv(rd, "recv-hb", function(d) return d.verdict == "behind" end) >= 1, "behind heartbeat logged with verdict behind")
+    check(countEv(rd, "recv-hb-gap") >= 1, "a behind heartbeat drives the resync path")
+end)
+
+test("authority restart at the same epoch (rev reset) rebaselines the peer instead of rejecting", function()
+    reset()
+    local ml = makeHost("ML", true, { epoch = "S1" })
+    local rd = makeHost("R", false, { epoch = "S1" })
+    ml.chan.nonce = "genA"
+
+    -- get the peer in sync and up to a high rev via a snapshot then deltas
+    setLine(ml, "K1", "v1")
+    ml.chan:Broadcast(true); settle()
+    for i = 2, 6 do deltaChange(ml, "K" .. i, "v" .. i) end
+    settle()
+    eq(rd.chan.appliedEpoch, "S1", "peer synced to S1")
+    eq(rd.chan.appliedGen, "genA", "peer recorded the authority's generation")
+    local highRev = rd.chan.lastRev
+    check(highRev and highRev >= 6, "peer is at a high rev before the restart (" .. tostring(highRev) .. ")")
+
+    -- ML reloads: rev restarts at 0, SAME session epoch, NEW generation, a fresh ledger
+    ml.chan.rev = 0
+    ml.chan.nonce = "genB"
+    ml.store = { ["FRESH"] = { "FRESH", "post-reload" } }
+    ml.chan:Broadcast(true); deliver()
+
+    eq(rd.chan.lastRev, 1, "peer rebaselined to the restarted authority's low rev")
+    eq(rd.chan.appliedGen, "genB", "peer adopted the new generation")
+    check(rd.store["FRESH"] ~= nil and rd.store["K1"] == nil, "peer took the restarted authority's ledger")
+    check(countEv(rd, "gen-restart") >= 1, "logged the generation restart")
+    eq(countEv(rd, "recv-snap-stale"), 0, "the restarted authority's low-rev snapshot was NOT rejected as stale")
+end)
+
+test("a same-generation lower-rev snapshot is still rejected as a stale backslide", function()
+    reset()
+    local ml = makeHost("ML", true, { epoch = "S1" })
+    local rd = makeHost("R", false, { epoch = "S1" })
+    ml.chan.nonce = "genA"
+
+    setLine(ml, "K1", "v1")
+    ml.chan:Broadcast(true); settle()
+    for i = 2, 5 do deltaChange(ml, "K" .. i, "v" .. i) end
+    settle()
+    local high = rd.chan.lastRev
+
+    -- a backlogged snapshot built at a LOWER rev but the SAME generation must NOT rebaseline us
+    ml.chan.rev = 1
+    ml.chan:Broadcast(true); deliver()
+    eq(rd.chan.lastRev, high, "peer did not regress on a same-generation lower-rev snapshot")
+    check(countEv(rd, "recv-snap-stale") >= 1, "same-generation backslide still rejected as stale")
+    eq(countEv(rd, "gen-restart"), 0, "no false generation-restart on the same generation")
+end)
+
 -- ===========================================================================
 print("")
 print(string.format("=== WeirdSync battery: %d passed, %d failed ===", pass, fail))
