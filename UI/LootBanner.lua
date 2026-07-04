@@ -34,6 +34,9 @@ local minimalMode = false
 -- Snappy mode: make every banner animation instant (no intro flourish, no per-card slide/glow, no
 -- fade-out) in BOTH looks, for players who prefer snappy over smooth. Slash-toggled for now.
 local instantMode = false
+-- Which side of a roll card the loot-master controls (End/Cancel) hang off. Slash-toggled for now;
+-- a lootmaster config option will pick it later.
+local mlControlsSide = "RIGHT"
 
 local BB_STATE_BANNER_IN = 1        -- banner is animating in
 local BB_STATE_KILL_HOLD = 2        -- banner is holding with the headline
@@ -183,6 +186,31 @@ end
 local function setChromeShown(banner, shown)
     for _, r in ipairs({ banner:GetRegions() }) do
         if shown then r:Show() else r:Hide() end
+    end
+end
+
+-- Anchor a roll card's ML control rail (End/Cancel) off the card's edge per the current side
+-- setting, stacking the buttons top-down. The minimalist badge peeks ~12px off the card's left
+-- edge, so the left-side rail backs off further there to clear it.
+local function anchorMLButtons(frame)
+    local minimal = frame:GetParent().minimal
+    local prev
+    for _, btn in ipairs(frame.MLButtons) do
+        btn:ClearAllPoints()
+        if mlControlsSide == "LEFT" then
+            if prev then
+                btn:SetPoint("TOPRIGHT", prev, "BOTTOMRIGHT", 0, -3)
+            else
+                btn:SetPoint("TOPRIGHT", frame, "TOPLEFT", minimal and -16 or -6, -4)
+            end
+        else
+            if prev then
+                btn:SetPoint("TOPLEFT", prev, "BOTTOMLEFT", 0, -3)
+            else
+                btn:SetPoint("TOPLEFT", frame, "TOPRIGHT", 6, -4)
+            end
+        end
+        prev = btn
     end
 end
 
@@ -723,6 +751,17 @@ local function buildBanner(bannerName, medallionCfg)
         frame.RollTimer:SetValue(1)
         frame.RollTimer:Hide()
 
+        -- Fade this roll card out now (bracket dismiss / ML End / ML Cancel), hiding its
+        -- interactive bits so they don't linger through the fade.
+        frame.MLButtons = {}
+        local function fadeOutRollRow()
+            frame.fading = true
+            frame.fadeLeft = BossBanner.instant and 0 or ROW_FADE_TIME
+            frame.RollTimer:Hide()
+            for _, b in ipairs(frame.RollButtons) do b:Hide() end
+            for _, b in ipairs(frame.MLButtons) do b:Hide() end
+        end
+
         -- Bracket buttons for roll-prompt rows (hidden on awarded rows). Clicking selects a bracket;
         -- the choice stays highlighted. (Wiring to the real roll response is the next step.)
         local BRACKETS = { { "BiS", 30 }, { "MS", 28 }, { "MU", 30 }, { "OS", 28 }, { "TM", 28 }, { "Pass", 40 } }
@@ -739,10 +778,7 @@ local function buildBanner(bannerName, medallionCfg)
                 if frame.selectedBracket == self.bracket then
                     -- second click on the already-selected bracket: dismiss this roll (fade the row out)
                     rbDbg(("DISMISS idx=%s rd=%s"):format(tostring(frame.__idx), tostring(frame.rollDuration)))
-                    frame.fading = true
-                    frame.fadeLeft = BossBanner.instant and 0 or ROW_FADE_TIME
-                    frame.RollTimer:Hide()
-                    for _, b in ipairs(frame.RollButtons) do b:Hide() end
+                    fadeOutRollRow()
                     if frame.onChosen then frame.onChosen(frame.selectedBracket) end
                     return
                 end
@@ -760,6 +796,28 @@ local function buildBanner(bannerName, medallionCfg)
             btn:Hide()
             frame.RollButtons[#frame.RollButtons + 1] = btn
             bx = bx + b[2] + 2
+        end
+
+        -- Loot-master controls: the extra roll actions the live popup gives the ML (End = close the
+        -- roll now and resolve, Cancel = abort it), stacked in a rail off the card's side (see
+        -- anchorMLButtons; the side will become a lootmaster config option). Shown only on roll
+        -- cards that carry the matching callback; future ML actions slot into this list.
+        local ML_CONTROLS = {
+            { label = "End",    width = 46, callbackKey = "onMLEnd" },
+            { label = "Cancel", width = 56, callbackKey = "onMLCancel" },
+        }
+        for _, c in ipairs(ML_CONTROLS) do
+            local btn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+            btn:SetText(c.label)
+            btn:SetWidth(c.width)
+            btn:SetHeight(17)
+            btn:SetScript("OnClick", function()
+                rbDbg(("ML-%s idx=%s"):format(c.label, tostring(frame.__idx)))
+                fadeOutRollRow()
+                if frame[c.callbackKey] then frame[c.callbackKey]() end
+            end)
+            btn:Hide()
+            frame.MLButtons[#frame.MLButtons + 1] = btn
         end
 
         return frame
@@ -1050,6 +1108,16 @@ local function buildBanner(bannerName, medallionCfg)
                 end
                 btn:Show()
             end
+            -- ML rail: only a card given ML callbacks shows the controls (the real feed passes
+            -- them only to the authorized loot master). Anchored per the current side each show.
+            frame.onMLEnd = data.onMLEnd
+            frame.onMLCancel = data.onMLCancel
+            if data.onMLEnd or data.onMLCancel then
+                anchorMLButtons(frame)
+                for _, btn in ipairs(frame.MLButtons) do btn:SetAlpha(1); btn:Show() end
+            else
+                for _, btn in ipairs(frame.MLButtons) do btn:Hide() end
+            end
             local b1 = frame.RollButtons[1]
             rbDbg(("add-DROP idx=%s reused=%s b_own=%.2f b_eff=%.2f f_own=%.2f f_eff=%.2f"):format(
                 tostring(frame.__idx), tostring(reused), b1:GetAlpha(), b1:GetEffectiveAlpha(),
@@ -1061,6 +1129,8 @@ local function buildBanner(bannerName, medallionCfg)
         frame.rollDuration = nil
         frame.RollTimer:Hide()
         for _, btn in ipairs(frame.RollButtons) do btn:Hide() end
+        frame.onMLEnd, frame.onMLCancel = nil, nil
+        for _, btn in ipairs(frame.MLButtons) do btn:Hide() end
         -- Won row: full lifetime; each additional drop EXTENDS the (won) rows already shown by half
         -- (capped at full), reviving any that were mid-fade, so earlier items linger to be read.
         local full = resultHoldSeconds()
@@ -1123,6 +1193,7 @@ local function buildBanner(bannerName, medallionCfg)
                         f:Hide()
                         if f.RollTimer then f.RollTimer:Hide() end
                         if f.RollButtons then for _, btn in ipairs(f.RollButtons) do btn:SetAlpha(1); btn:Hide() end end
+                        if f.MLButtons then for _, btn in ipairs(f.MLButtons) do btn:SetAlpha(1); btn:Hide() end end
                         removed = true
                     else
                         f:SetAlpha(f.fadeLeft / ROW_FADE_TIME)
@@ -1232,6 +1303,7 @@ local function buildBanner(bannerName, medallionCfg)
             f:SetAlpha(1)
             if f.RollTimer then f.RollTimer:Hide() end
             if f.RollButtons then for _, btn in ipairs(f.RollButtons) do btn:SetAlpha(1); btn:Hide() end end
+            if f.MLButtons then for _, btn in ipairs(f.MLButtons) do btn:SetAlpha(1); btn:Hide() end end
             f:Hide()
         end
         banner:SetHeight(banner.baseHeight)
@@ -1336,6 +1408,8 @@ local function buildBanner(bannerName, medallionCfg)
             disabled = item.disabled,   -- set of bracket labels (e.g. {OS=true}) the player can't pick
             prio = item.prio,           -- roll card only: the item's listed priority, shown under the name
             onChosen = item.onChosen,   -- roll card only: fired with the chosen bracket when the card is dismissed
+            onMLEnd = item.onMLEnd,     -- roll card only: ML control; present = show the End button, fired on click
+            onMLCancel = item.onMLCancel, -- roll card only: ML control; present = show the Cancel button
         }
         if self.animState == BB_STATE_LOOT_INSERT then
             addRow(self, data)
@@ -1578,7 +1652,16 @@ local function runBannerExample()
                 if awarded or bracket == "Pass" then return end
                 awarded = true
                 exampleAfter(2, function() addon:AddLootBannerItem(buildWon(base, 1)) end)
-            end }
+            end,
+            -- EXAMPLE ONLY: ML controls on the roll card (the demo player acts as the ML). End
+            -- resolves the roll now (same demo award as a dismissed pick); Cancel aborts it with
+            -- no award. Real banners will pass these only for the authorized loot master.
+            onMLEnd = function()
+                if awarded then return end
+                awarded = true
+                exampleAfter(2, function() addon:AddLootBannerItem(buildWon(base, 1)) end)
+            end,
+            onMLCancel = function() awarded = true end }
     end
 
     -- DROPS banner: a couple of items up for roll (dice medallion).
@@ -1613,4 +1696,11 @@ SLASH_WLBANNERINSTANT1 = "/wlbannerinstant"
 SlashCmdList["WLBANNERINSTANT"] = function()
     instantMode = not instantMode
     print("WeirdLoot banner animations: " .. (instantMode and "INSTANT (snappy)" or "smooth"))
+end
+-- `/wlbannermlside` flips the ML End/Cancel rail between the roll card's right and left edge; re-run
+-- /wlbanner(min) to see it. A lootmaster config option will pick the default later.
+SLASH_WLBANNERMLSIDE1 = "/wlbannermlside"
+SlashCmdList["WLBANNERMLSIDE"] = function()
+    mlControlsSide = (mlControlsSide == "RIGHT") and "LEFT" or "RIGHT"
+    print("WeirdLoot banner ML controls: " .. mlControlsSide)
 end
