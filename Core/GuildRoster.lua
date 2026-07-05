@@ -226,60 +226,12 @@ function addon:RefreshGuildRoster()
         end
     end
 
-    -- One-time legacy cleanup, and only against a FULL member list: a partial (online-only)
-    -- scan would read offline guildies as non-members and leave their shadow entries behind.
-    if fullScan then
-        self:PurgeGuildCoveredGuestEntries()
-    end
-
     self:AutoClearMatchedOverrides()
-    -- Note-readers refresh the shared cache on every scan: it is both what they serve to
-    -- requesters and their own fallback if permissions ever change out from under them.
-    if canViewNotes then
-        self:StoreGuildNotesCache(self:BuildGuildNotesPayload(), util.GetPlayerName and util:GetPlayerName("player") or nil)
-    end
+    -- Note-readers never write the cache: they serve requests straight from the live scan
+    -- and are never blind themselves. Only a requester receiving GNOTES persists it
+    -- (OnGuildNotesData) -- one writer, so the cache always means "what the relay last sent
+    -- ME", not whatever client happened to scan last (which muddied a shared-SV multibox).
     self:TriggerCallback("GUILD_ROSTER_REFRESHED")
-end
-
--- One-time (stamp-gated) purge of guest-layer entries that guild data now covers. Installs
--- that predate the guild-derived roster carry the old shipped list in SavedVariables; for
--- current guild members those entries are a stale shadow copy (rank + officer note are
--- authoritative), so they go. Non-members stay: that IS the guest layer. Runs on the first
--- full guild scan rather than at login because membership isn't known until the server
--- replies. The stamp sets even when nothing dropped, so this never re-runs against entries
--- the user adds later.
-function addon:PurgeGuildCoveredGuestEntries()
-    local cfg = self.config
-    if not cfg or cfg.rosterGuestPurgeV1Applied then
-        return
-    end
-    local members = self.guildRoster and self.guildRoster.members
-    if not members or type(cfg.rosterEntries) ~= "table" then
-        return
-    end
-
-    local kept, dropped = {}, 0
-    for _, entry in ipairs(cfg.rosterEntries) do
-        if members[util:NormalizeKey(entry.name or "")] then
-            dropped = dropped + 1
-        else
-            kept[#kept + 1] = entry
-        end
-    end
-
-    cfg.rosterGuestPurgeV1Applied = true
-    if dropped == 0 then
-        return
-    end
-    cfg.rosterEntries = kept
-    cfg.revision = (cfg.revision or 0) + 1
-    self:NormalizeAllConfig()
-    if self.roster then
-        self:RefreshRoster()
-    end
-    self:TriggerCallback("CONFIG_UPDATED")
-    self:Print(string.format("Roster: cleared %d legacy entr%s now covered by guild data.",
-        dropped, dropped == 1 and "y" or "ies"))
 end
 
 -- Overrides exist to correct the durable sources until they catch up; once rank+note derive
@@ -424,6 +376,10 @@ end
 
 function addon:OnGuildNotesData(sender, notes)
     if type(notes) ~= "table" then return end
+    -- Note data must come from a guildmate: a non-member whisper can't be carrying officer
+    -- notes we'd want. (Membership is the strongest check available remotely: note-READ
+    -- permission itself isn't queryable for other players.)
+    if not self:GetGuildMemberProfile(sender) then return end
     self:StoreGuildNotesCache(notes, sender)
     self:RefreshGuildRoster()
     if self.roster then

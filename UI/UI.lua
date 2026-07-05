@@ -373,6 +373,48 @@ function addon:BuildBottomTabs()
     self.ui.versionLabel = versionLabel
 end
 
+-- Raid-data alarm on the Roster tab button: a count badge plus a pulsing "!" whenever the
+-- current raid contains members with a blank spec or unknown status (they would silently
+-- fall out of spec-prio tiers; see the needsAttention flag in Core/Roster.lua).
+function addon:UpdateRaidersTabAlert(attentionCount)
+    local tab = self.ui and self.ui.tabs and self.ui.tabs.raiders
+    if not tab then
+        return
+    end
+
+    if (attentionCount or 0) > 0 then
+        tab:SetText(string.format("%s (|cffff3333%d!|r)", TAB_LABELS.raiders, attentionCount))
+        if not tab.alertIcon then
+            local holder = CreateFrame("Frame", nil, tab)
+            holder:SetWidth(20)
+            holder:SetHeight(20)
+            holder:SetPoint("CENTER", tab, "TOPRIGHT", -6, -2)
+            local icon = holder:CreateTexture(nil, "OVERLAY")
+            icon:SetAllPoints(holder)
+            icon:SetTexture("Interface\\GossipFrame\\AvailableQuestIcon")
+            local anim = holder:CreateAnimationGroup()
+            local fade = anim:CreateAnimation("Alpha")
+            fade:SetChange(-0.8)
+            fade:SetDuration(0.6)
+            anim:SetLooping("BOUNCE")
+            tab.alertIcon = holder
+            tab.alertAnim = anim
+        end
+        tab.alertIcon:Show()
+        if tab.alertAnim and not tab.alertAnim:IsPlaying() then
+            tab.alertAnim:Play()
+        end
+    else
+        tab:SetText(TAB_LABELS.raiders)
+        if tab.alertAnim then
+            tab.alertAnim:Stop()
+        end
+        if tab.alertIcon then
+            tab.alertIcon:Hide()
+        end
+    end
+end
+
 -- transient = show the tab without remembering it as the last-used tab (for the owed-loot minimap
 -- jump, which must not overwrite the user's real last tab).
 function addon:SelectTab(tabKey, transient)

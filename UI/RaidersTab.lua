@@ -32,9 +32,10 @@ function addon:GetSortedRosterEntries()
     end
 
     table.sort(entries, function(left, right)
-        -- Unhandled guests float above every sort mode until a spec is assigned.
-        if (left.isGuest or false) ~= (right.isGuest or false) then
-            return left.isGuest or false
+        -- Underspecified raid members (blank spec / unknown status, incl. unhandled guests)
+        -- float above every sort mode until their data is filled.
+        if (left.needsAttention or false) ~= (right.needsAttention or false) then
+            return left.needsAttention or false
         end
         if sortMode == "raid" then
             if left.present ~= right.present then
@@ -78,7 +79,10 @@ end
 local rosterMenuFrame
 
 local function canEditRoster()
-    return addon:IsAuthorizedLootMaster() or addon:IsGuildLeadership(util:GetPlayerName("player"))
+    local me = util:GetPlayerName("player")
+    return addon:IsAuthorizedLootMaster()
+        or addon:IsRaidLeadership(me)
+        or addon:IsGuildLeadership(me)
 end
 
 local function applyPick(entry, specName, status)
@@ -131,7 +135,7 @@ end
 local function refuseRosterEdit(entry)
     if not entry then return true end
     if not canEditRoster() then
-        addon:Print("Roster edit requires being the loot master or guild leadership.")
+        addon:Print("Roster edit requires being the loot master, raid leader/assistant, or guild leadership.")
         return true
     end
     return false
@@ -262,6 +266,12 @@ function addon:BuildRaidersTab()
         -- Explicit geometry (label anchor + width, fixed height): a FontString's own rect
         -- auto-sizes from its text and can be degenerate, which would leave a SetAllPoints
         -- button with no clickable area.
+        -- Attention tint: a quiet red wash under rows whose raid member needs data filled.
+        row.attentionBg = row:CreateTexture(nil, "BACKGROUND")
+        row.attentionBg:SetAllPoints(row)
+        row.attentionBg:SetTexture(0.8, 0.1, 0.1, 0.14)
+        row.attentionBg:Hide()
+
         row.specClick = CreateFrame("Button", nil, row)
         elevateInteractiveFrame(row.specClick, row, 10)   -- same lift as LootTab's itemHitbox; default child level sits below the list chrome
         row.specClick:RegisterForClicks("LeftButtonUp")
@@ -328,7 +338,7 @@ function addon:RefreshRaidersTab()
     local rosterEntries = self:GetSortedRosterEntries()
 
     -- Counts come from the FULL display list, not the (possibly raid-only filtered) view.
-    local guildCount, guestLayerCount, guestCount = 0, 0, 0
+    local guildCount, guestLayerCount, guestCount, attentionCount = 0, 0, 0, 0
     for _, entry in ipairs(self:GetRosterDisplayList()) do
         if entry.source == "guild" then
             guildCount = guildCount + 1
@@ -338,7 +348,11 @@ function addon:RefreshRaidersTab()
         if entry.isGuest then
             guestCount = guestCount + 1
         end
+        if entry.needsAttention then
+            attentionCount = attentionCount + 1
+        end
     end
+    self:UpdateRaidersTabAlert(attentionCount)
 
     if self.ui.raidersSummary then
         self.ui.raidersSummary:SetText(string.format(
@@ -363,10 +377,23 @@ function addon:RefreshRaidersTab()
         row.present:SetTextColor(entry.present and 0.3 or 0.7, entry.present and 0.9 or 0.3, 0.3)
         row.name:SetText((util:GetClassColorCode(entry.className) or "|cffffffff") .. util:TitleCaseWords(entry.name or "") .. "|r")
         -- Overridden cells get a gold star: the durable source (note/rank) is being outvoted.
-        row.classSpec:SetText((util:GetClassColorCode(entry.className) or "|cffffffff") .. util:TitleCaseWords(string.trim((entry.className or "") .. " " .. (entry.specName or ""))) .. "|r"
-            .. (entry.overriddenSpec and "|cffffcc00*|r" or ""))
-        row.status:SetText(util:PlayerDisplayStatus(entry.status)
-            .. (entry.overriddenStatus and "|cffffcc00*|r" or ""))
+        -- Underspecified cells on raid members get a red call-to-action instead of a quiet
+        -- blank: the cell itself is the click target that fixes it.
+        local specText = (util:GetClassColorCode(entry.className) or "|cffffffff") .. util:TitleCaseWords(string.trim((entry.className or "") .. " " .. (entry.specName or ""))) .. "|r"
+            .. (entry.overriddenSpec and "|cffffcc00*|r" or "")
+        if entry.needsAttention and (entry.specName or "") == "" then
+            specText = specText .. " |cffff3333set spec!|r"
+        end
+        row.classSpec:SetText(specText)
+        if entry.needsAttention and entry.status == "unknown" then
+            row.status:SetText("|cffff3333Unknown!|r")
+        else
+            row.status:SetText(util:PlayerDisplayStatus(entry.status)
+                .. (entry.overriddenStatus and "|cffffcc00*|r" or ""))
+        end
+        if row.attentionBg then
+            if entry.needsAttention then row.attentionBg:Show() else row.attentionBg:Hide() end
+        end
         if entry.isGuest then
             row.source:SetText("Guest")
             row.source:SetTextColor(1, 0.82, 0.2)

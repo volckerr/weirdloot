@@ -277,9 +277,16 @@ function addon:PLAYER_LOGIN()
             )
         end
 
-        -- No shipped-roster reseed: the guild IS the roster source (rank -> status, officer
-        -- note -> spec; see Core/GuildRoster.lua). Saved rosterEntries persist untouched as the
-        -- guest/override layer only, so a manual edit is never clobbered by an addon update.
+        -- One-time wipe of the legacy shipped roster: the guild IS the roster source (rank ->
+        -- status, officer note -> spec; see Core/GuildRoster.lua) and the old saved entries were
+        -- shipped defaults, not user data. Unconditional at load -- deliberately independent of
+        -- guild data, which is not available yet and must never gate a deletion. Entries added
+        -- AFTER the stamp (guests via the Raiders tab) persist as the guest layer.
+        if not WeirdLootDB.config.rosterLegacyWipeApplied then
+            WeirdLootDB.config.rosterEntries = {}
+            WeirdLootDB.config.rosterImportText = ""
+            WeirdLootDB.config.rosterLegacyWipeApplied = true
+        end
     end
 
     -- One-time flip to newest-mint-first Loot ordering for characters created before it existed

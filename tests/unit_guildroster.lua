@@ -385,7 +385,6 @@ H.test("BuildRosterDisplay: guild-first with guest layer and live pugs", functio
         roster = {},
         rosterImportText = "", lootPriorityText = "", namedItemsText = "",
         lootRules = {}, namedRules = {}, revision = 0,
-        rosterGuestPurgeV1Applied = true,   -- keep the guildie entry: this test exercises the spec-fill merge, not the purge
     }
     addon.config.roster = addon:BuildRosterMap(addon.config.rosterEntries)
     addon:RefreshGuildRoster()
@@ -407,6 +406,9 @@ H.test("BuildRosterDisplay: guild-first with guest layer and live pugs", functio
     H.eq(byName.Randomer.source, "unconfigured", "live pug row kept")
     H.eq(byName.Randomer.isGuest, true, "present tokenless non-guildie flagged guest")
     H.eq(byName.puggo.isGuest, false, "absent guest-layer entry not flagged")
+    H.eq(byName.Randomer.needsAttention, true, "present blank-spec member needs attention")
+    H.eq(byName.puggo.needsAttention, false, "absent entries never flagged for attention")
+    H.eq(byName.Achera.needsAttention, false, "absent guildie not flagged even with data")
 end)
 
 local function fullConfig()
@@ -513,50 +515,6 @@ H.test("OnRosterOverride: same authority gate as guest upsert, clear converges",
 end)
 
 ------------------------------------------------------------------------
--- Legacy guest-layer purge: one-time, full-scan-only, guildies dropped,
--- true guests kept, stamp prevents re-runs
-------------------------------------------------------------------------
-H.test("PurgeGuildCoveredGuestEntries: guildies dropped once, guests kept", function()
-    installGuildApi(true)
-    addon.config = fullConfig()
-    addon.config.rosterEntries = {
-        { name = "uzragol", className = "shaman", specName = "restoration", status = "main" },
-        { name = "puggo", className = "rogue", specName = "combat", status = "main" },
-    }
-    addon:InitializeRoster()
-    addon:RequestGuildRoster()   -- purge only trusts borrow-cycle (provably full) scans
-    addon:RefreshGuildRoster()
-    H.eq(#addon.config.rosterEntries, 1, "guild-covered entry dropped")
-    H.eq(addon.config.rosterEntries[1].name, "puggo", "true guest kept")
-    H.eq(addon.config.rosterGuestPurgeV1Applied, true, "stamp set")
-
-    addon:UpsertRosterEntry({ name = "uzragol", className = "shaman", specName = "restoration", status = "main" })
-    addon:RequestGuildRoster()
-    addon:RefreshGuildRoster()
-    H.eq(#addon.config.rosterEntries, 2, "stamped: entries added later are never re-purged")
-end)
-
-H.test("PurgeGuildCoveredGuestEntries: never against a partial (online-only) scan", function()
-    installGuildApi(true)
-    showOffline = false          -- player's view hides offline; Achera is invisible
-    addon.guildRoster = nil
-    addon.config = fullConfig()
-    addon.config.rosterEntries = {
-        { name = "achera", className = "death knight", specName = "frost", status = "main" },
-    }
-    addon:InitializeRoster()
-    addon:RefreshGuildRoster()   -- spontaneous update, not ours: never a purge trigger
-    H.eq(#addon.config.rosterEntries, 1, "offline guildie's entry survives the partial scan")
-    H.eq(addon.config.rosterGuestPurgeV1Applied, nil, "stamp not set: purge still pending")
-
-    addon:RequestGuildRoster()   -- borrow cycle: filter forced on, scan provably full
-    addon:RefreshGuildRoster()
-    H.eq(#addon.config.rosterEntries, 0, "purged on the borrow-cycle scan")
-    H.eq(addon.config.rosterGuestPurgeV1Applied, true, "stamp set")
-    H.eq(showOffline, false, "player's filter restored after the borrow")
-end)
-
-------------------------------------------------------------------------
 -- Show-offline borrow: request flips it on, refresh restores the player's
 -- setting, and offline-hidden rescans merge instead of clobbering
 ------------------------------------------------------------------------
@@ -634,6 +592,39 @@ H.test("OnGuestUpsert: accepted from ML or leadership, refused otherwise", funct
     H.eq(#addon.config.rosterEntries, 1, "empty name ignored")
 end)
 
+H.test("IsRaidLeadership / comm gates: raid leader and assistant qualify by raid rank", function()
+    installGuildApi(true)
+    addon.config = fullConfig()
+    addon:InitializeRoster()
+    addon:RefreshGuildRoster()
+    addon.roster.lootMasterName = nil
+
+    -- Simulate a raid: Leadguy leads (rank 2), Helper assists (rank 1), Grunt is a member.
+    env.GetNumRaidMembers = function() return 3 end
+    env.GetRaidRosterInfo = function(index)
+        if index == 1 then return "Leadguy", 2 end
+        if index == 2 then return "Helper", 1 end
+        if index == 3 then return "Grunt", 0 end
+    end
+
+    H.eq(addon:IsRaidLeadership("Leadguy"), true, "raid leader")
+    H.eq(addon:IsRaidLeadership("HELPER"), true, "assistant, case-insensitive")
+    H.eq(addon:IsRaidLeadership("Grunt"), false, "plain member")
+    H.eq(addon:IsRaidLeadership("Stranger"), false, "not in the raid")
+
+    addon:OnGuestUpsert("Grunt", { "puggo", "mage", "frost", "main" })
+    H.eq(addon.config.roster.puggo, nil, "plain member refused")
+    addon:OnGuestUpsert("Leadguy", { "puggo", "mage", "frost", "main" })
+    H.eq(addon.config.roster.puggo.specName, "frost", "raid leader accepted (no ML, no guild rank)")
+    addon:OnRosterOverride("Helper", { "Uzragol", "restoration", "" })
+    H.eq(addon:GetRosterOverride("Uzragol").specName, "restoration", "assistant accepted for overrides")
+    addon:SetRosterOverride("Uzragol", "", "")
+
+    -- restore the no-group stubs other tests rely on
+    env.GetNumRaidMembers = function() return 0 end
+    env.GetRaidRosterInfo = function() return nil end
+end)
+
 ------------------------------------------------------------------------
 -- Officer-note relay: payload, cache harvest, blind-client substitution,
 -- request/reply handlers
@@ -655,13 +646,11 @@ H.test("BuildGuildNotesPayload: noted members only; nil when blind", function()
     H.eq(addon:BuildGuildNotesPayload(), nil, "blind client serves nothing")
 end)
 
-H.test("RefreshGuildRoster: note-reader harvests the cache on every scan", function()
+H.test("RefreshGuildRoster: note-readers never write the cache", function()
     installGuildApi(true)
     addon.db = {}
     addon:RefreshGuildRoster()
-    local cache = addon:GetGuildNotesCache()
-    H.eq(cache.notes.achera.s, "frost", "cache holds parsed notes")
-    H.eq(cache.notes.bosslady.o, "designatedalt", "cache holds overrides")
+    H.eq(addon:GetGuildNotesCache(), nil, "sighted scan leaves the cache untouched (requester-only writes)")
 end)
 
 H.test("RefreshGuildRoster: blind client substitutes cached notes", function()
@@ -710,14 +699,89 @@ H.test("relay handlers: request answered only by note-readers, data applies + pe
 
     installGuildApi(false)
     addon.db = {}
-    addon:OnGuildNotesData("Officer", { uzragol = { s = "enhancement" } })
-    H.eq(addon.db.guildNotesCache.from, "Officer", "cache records the source")
+    addon:OnGuildNotesData("Stranger", { uzragol = { s = "enhancement" } })
+    H.eq(addon.db.guildNotesCache, nil, "non-guildie sender rejected")
+    addon:OnGuildNotesData("Bosslady", { uzragol = { s = "enhancement" } })
+    H.eq(addon.db.guildNotesCache.from, "Bosslady", "guildmate sender cached, source recorded")
     H.eq(addon:GetGuildMemberProfile("Uzragol").specName, "enhancement", "roster re-derived from new data")
-    addon:OnGuildNotesData("Officer", "garbage")
+    addon:OnGuildNotesData("Bosslady", "garbage")
     H.eq(addon.db.guildNotesCache.notes.uzragol.s, "enhancement", "non-table payload ignored")
 
     addon.comm = nil
     addon.db = nil
+end)
+
+------------------------------------------------------------------------
+-- Legacy roster wipe: unconditional one-time delete at login (Core.lua),
+-- deliberately independent of guild data
+------------------------------------------------------------------------
+H.test("legacy roster wipe: fires once at login, post-stamp guests persist", function()
+    local w = F.makeWorld("Wiper", true)
+    H.eq(w.env.WeirdLootDB.config.rosterLegacyWipeApplied, true, "stamp set on first login")
+
+    -- Simulate a pre-branch SV arriving at login: legacy entries present, stamp absent.
+    w.env.WeirdLootDB.config.rosterEntries = {
+        { name = "seme", className = "druid", specName = "restoration", status = "designatedalt" },
+    }
+    w.env.WeirdLootDB.config.rosterLegacyWipeApplied = nil
+    w.addon:PLAYER_LOGIN()
+    H.eq(#w.env.WeirdLootDB.config.rosterEntries, 0, "legacy entries wiped at login, no guild data needed")
+    H.eq(w.env.WeirdLootDB.config.rosterLegacyWipeApplied, true, "stamp re-set")
+
+    -- Entries added AFTER the stamp are user data and survive subsequent logins.
+    w.addon:UpsertRosterEntry({ name = "puggo", className = "rogue", specName = "combat", status = "main" })
+    w.addon:PLAYER_LOGIN()
+    H.eq(w.env.WeirdLootDB.config.roster.puggo.specName, "combat", "post-stamp guest survives a relog")
+end)
+
+------------------------------------------------------------------------
+-- Gaining ML authority requests the note relay (mid-raid ML swap)
+------------------------------------------------------------------------
+H.test("RefreshLootAuthority: false->true ML transition requests guild notes", function()
+    -- Framework worlds resolve "Masterlooter" as the raid's ML; being named that is how a
+    -- world self-resolves authority through the real RefreshLootAuthority path.
+    local w = F.makeWorld("Masterlooter", true)
+    local requests = 0
+    w.addon.RequestGuildNotes = function() requests = requests + 1 end
+
+    w.addon.roster.isLootMaster = false          -- force a fresh authority transition
+    w.addon:RefreshLootAuthority()
+    H.eq(w.addon.roster.isLootMaster, true, "world resolves us as ML")
+    H.eq(requests, 1, "transition fires one relay request")
+
+    w.addon:RefreshLootAuthority()               -- steady re-resolve: no transition
+    H.eq(requests, 1, "no re-request without a transition")
+end)
+
+------------------------------------------------------------------------
+-- Override catch-up rides the session snapshot: in-raid overrides only,
+-- upsert-only on the receiver
+------------------------------------------------------------------------
+H.test("session snapshot carries in-raid overrides; upsert-only, raid-scoped", function()
+    local ml = F.makeWorld("Masterlooter", true)
+    local raider = F.makeWorld("Raiderlate", false)
+    F.startSession(ml)
+
+    -- Worlds stub live attendance to empty; place one attendee in the session directly.
+    local attendee = { name = "Innraid", className = "druid", specName = "", status = "main" }
+    ml.addon.session.attendees = { attendee }
+
+    -- ML overrides: one for the attendee, one for someone not in the session.
+    ml.addon:SetRosterOverride(attendee.name, "restoration", "designatedalt")
+    ml.addon:SetRosterOverride("Absentee", "fire", "")
+
+    -- Raider's pre-existing local override for a third player must survive untouched.
+    raider.addon:SetRosterOverride("Thirdguy", "arcane", "")
+
+    F.clearWire()
+    ml.addon:BroadcastSession()
+    F.flushWireTo(raider)
+
+    local got = raider.addon:GetRosterOverride(attendee.name)
+    H.eq(got and got.specName, "restoration", "attendee override arrived via snapshot")
+    H.eq(got and got.status, "designatedalt", "both fields carried")
+    H.eq(raider.addon:GetRosterOverride("Absentee"), nil, "non-attendee override NOT transmitted")
+    H.eq(raider.addon:GetRosterOverride("Thirdguy").specName, "arcane", "unrelated local override untouched")
 end)
 
 F.endSuite()

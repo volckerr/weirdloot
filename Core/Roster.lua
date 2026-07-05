@@ -112,6 +112,12 @@ function addon:BuildRosterDisplay(attendeesByName)
         entry.isGuest = entry.present
             and not (self.GetGuildMemberProfile and self:GetGuildMemberProfile(entry.name))
             and (entry.specName or "") == ""
+        -- Underspecified RAID member: blank spec silently drops them out of spec-prio tiers
+        -- (exact-key matcher) and unknown status means nobody assigned them. The tab floats,
+        -- tints, and badges these until leadership fills the data (the chosen alternative to
+        -- softening the resolver).
+        entry.needsAttention = (entry.present
+            and (entry.status == "unknown" or (entry.specName or "") == "")) and true or false
     end
 
     table.sort(display, function(left, right)
@@ -243,6 +249,12 @@ function addon:RefreshLootAuthority()
     -- out-rank us). Only a false->true transition fires it, so the event/retry re-runs do not re-mint.
     if isLootMaster and not wasLootMaster then
         self:AssumeLootMasterSession()
+        -- A blind ML needs the officer-note map (spec/status tokens) for resolution; ask the
+        -- guild the moment authority lands, so a mid-raid ML swap doesn't wait for the next
+        -- session start. No-op for note-readers and non-guildies (guards in RequestGuildNotes).
+        if self.RequestGuildNotes then
+            self:RequestGuildNotes()
+        end
     end
 
     -- A raider that just learned (or changed) who the loot master is -- e.g. the raid roster finally
@@ -268,6 +280,40 @@ end
 
 function addon:IsAuthorizedLootMaster()
     return self.roster.isLootMaster
+end
+
+-- Raid leadership (leader or assistant; party leader in a 5-man), by NAME. This is the roster
+-- EDIT gate's third leg, deliberately separate from loot authority: loot authority is
+-- master-loot-only (a leader has nothing to distribute under group loot; see the test-mode-only
+-- fallback in RefreshLootAuthority), but fixing roster data must not wait for master loot to be
+-- switched on. Verifiable by every group member, so comm receivers can gate on the sender too.
+function addon:IsRaidLeadership(playerName)
+    local key = util:NormalizeKey(playerName or "")
+    if key == "" then
+        return false
+    end
+    local numRaid = (GetNumRaidMembers and GetNumRaidMembers()) or 0
+    if numRaid > 0 then
+        for index = 1, numRaid do
+            local name, rank = GetRaidRosterInfo(index)
+            if name and util:NormalizeKey(util:StripRealm(name)) == key then
+                return rank == 2 or rank == 1
+            end
+        end
+        return false
+    end
+    local numParty = (GetNumPartyMembers and GetNumPartyMembers()) or 0
+    if numParty > 0 then
+        if util:NormalizeKey(util:GetPlayerName("player") or "") == key then
+            return (IsPartyLeader and IsPartyLeader()) and true or false
+        end
+        local leaderIndex = (GetPartyLeaderIndex and GetPartyLeaderIndex()) or 0
+        if leaderIndex > 0 then
+            local leaderName = UnitName and UnitName("party" .. leaderIndex) or nil
+            return (leaderName and util:NormalizeKey(util:StripRealm(leaderName)) == key) and true or false
+        end
+    end
+    return false
 end
 
 function addon:GetLootMasterName()

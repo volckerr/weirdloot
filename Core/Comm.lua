@@ -332,6 +332,14 @@ function addon:SyncBuildSnapshot(emit)
         self:IsLootMasterAcceptingTrades() and "1" or "0" })
     for _, attendee in ipairs(session.attendees or {}) do
         emit({ "A", attendee.name or "", attendee.className or "", attendee.specName or "", attendee.status or "nil" })
+        -- "O" line: the ML's spec/status override for this attendee, so re-loggers and late
+        -- joiners converge on overrides they missed live (ROSTER_OVERRIDE is set-time only).
+        -- Scoped strictly to CURRENT attendees -- never the whole override store -- and
+        -- upsert-only on the receiving side: absence of a line clears nothing.
+        local override = self.GetRosterOverride and self:GetRosterOverride(attendee.name)
+        if override then
+            emit({ "O", attendee.name or "", override.specName or "", override.status or "" })
+        end
     end
     for _, lot in ipairs(core:All()) do
         if lot.state == core.STATE.RESOLVED or core:LiveCount(lot.id) > 0 then
@@ -367,6 +375,13 @@ function addon:SyncApplySnapshot(lines, epoch)
             self.session.attendees[#self.session.attendees + 1] = {
                 name = f[2], className = f[3], specName = f[4], status = f[5],
             }
+        elseif tag == "O" then
+            -- ML's override for an in-raid player: adopt it (upsert only; WeirdSync already
+            -- guarantees the snapshot's authority). Records always carry at least one field,
+            -- so this can never act as a clear.
+            if (f[3] or "") ~= "" or (f[4] or "") ~= "" then
+                self:SetRosterOverride(f[2], f[3] or "", f[4] or "")
+            end
         elseif tag == "L" then
             local lot, lotSeq, remaining = self:DecodeLotValue(f)
             lots[#lots + 1] = lot
@@ -518,7 +533,7 @@ end
 function addon:OnGuestUpsert(sender, fields)
     local senderKey = util:NormalizeKey(sender or "")
     local isLootMaster = senderKey ~= "" and senderKey == util:NormalizeKey(self:GetLootMasterName() or "")
-    if not isLootMaster and not self:IsGuildLeadership(sender) then
+    if not isLootMaster and not self:IsRaidLeadership(sender) and not self:IsGuildLeadership(sender) then
         return
     end
     local name = fields[1] or ""
@@ -547,7 +562,7 @@ end
 function addon:OnRosterOverride(sender, fields)
     local senderKey = util:NormalizeKey(sender or "")
     local isLootMaster = senderKey ~= "" and senderKey == util:NormalizeKey(self:GetLootMasterName() or "")
-    if not isLootMaster and not self:IsGuildLeadership(sender) then
+    if not isLootMaster and not self:IsRaidLeadership(sender) and not self:IsGuildLeadership(sender) then
         return
     end
     local name = fields[1] or ""
