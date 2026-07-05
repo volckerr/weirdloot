@@ -163,7 +163,7 @@ function addon:PLAYER_LOGIN()
         autoRoll = false,        -- newly-looted/traded-in items auto-start a live roll (default OFF)
         config = {
             rosterImportText = defaultRosterImportText,
-            rosterEntries = addon.defaultRosterEntries,
+            rosterEntries = {},   -- guest/override layer only; guild data is the roster source
             lootPriorityText = addon.defaultLootPriorityText,
             namedItemsText = addon.defaultNamedItemsText,
             roster = {},
@@ -276,16 +276,9 @@ function addon:PLAYER_LOGIN()
             )
         end
 
-        -- One-time roster reset: existing characters carry a saved roster that includes ghosts
-        -- (anagke, araea, burgah, cheezburgah, clemency, ...) from the OLD default list. The
-        -- 70-entry list is now authoritative; stamp once so this only runs against pre-stamp DBs
-        -- and never re-clobbers a roster the user later edits. Fresh installs already get the new
-        -- defaults via util:EnsureDefaults, so the stamp is also set during the defaults block below.
-        if not WeirdLootDB.config.rosterDefaultV2Applied then
-            WeirdLootDB.config.rosterEntries = addon.util:CloneTable(addon.defaultRosterEntries or {})
-            WeirdLootDB.config.rosterImportText = ""   -- forces NormalizeAllConfig to re-serialize from rosterEntries
-            WeirdLootDB.config.rosterDefaultV2Applied = true
-        end
+        -- No shipped-roster reseed: the guild IS the roster source (rank -> status, officer
+        -- note -> spec; see Core/GuildRoster.lua). Saved rosterEntries persist untouched as the
+        -- guest/override layer only, so a manual edit is never clobbered by an addon update.
     end
 
     -- One-time flip to newest-mint-first Loot ordering for characters created before it existed
@@ -348,6 +341,8 @@ function addon:PLAYER_LOGIN()
     self.events:RegisterEvent("PLAYER_REGEN_ENABLED")
     self.events:RegisterEvent("LOOT_OPENED")
     self.events:RegisterEvent("LOOT_BIND_CONFIRM")
+    self.events:RegisterEvent("GUILD_ROSTER_UPDATE")
+    self:RequestGuildRoster()
 
     self:RefreshAll()
     self:ResumePayoutMode()      -- a session restored from SavedVariables keeps payout mode on
@@ -543,6 +538,40 @@ function addon:HandleSlashCommand(msg)
             and "ON - every item in your bags counts as session loot (city testing)."
             or "OFF - only tradable epics count."))
         self:RefreshSessionItems(true)
+    elseif command == "guild" then
+        self:RequestGuildRoster()
+        local roster = self.guildRoster
+        if not roster then
+            self:Print("Guild roster: not in a guild (or no data yet; try again in a moment).")
+        else
+            local withSpec, total = 0, 0
+            for _, member in pairs(roster.members) do
+                total = total + 1
+                if member.specName ~= "" then withSpec = withSpec + 1 end
+            end
+            self:Print(string.format("Guild roster: %d members, officer notes %s, %d with a spec token.",
+                total, roster.canViewNotes and "readable" or "NOT readable (relay needed)", withSpec))
+            if not roster.canViewNotes then
+                local cache = self:GetGuildNotesCache()
+                if cache and next(cache.notes or {}) then
+                    local entries = 0
+                    for _ in pairs(cache.notes) do entries = entries + 1 end
+                    local ageMinutes = math.floor(((time() or 0) - (cache.at or 0)) / 60)
+                    self:Print(string.format("  using relayed notes from %s (%d entries, %dm old); re-requesting.",
+                        tostring(cache.from), entries, ageMinutes))
+                else
+                    self:Print("  no relayed note data yet; requesting from online officers.")
+                end
+                self:RequestGuildNotes()
+            end
+            for rankIndex = 0, 9 do
+                local rankName = roster.rankNames[rankIndex]
+                if rankName then
+                    self:Print(string.format("  rank %d: %s -> %s", rankIndex, rankName,
+                        self:GuildRankStatus(rankIndex)))
+                end
+            end
+        end
     elseif command == "debug" or string.sub(command, 1, 6) == "debug " then
         local rest = string.match(string.trim(msg or ""), "^%S+%s*(.*)$")
         self:HandleDebugCommand(rest)

@@ -113,14 +113,11 @@ function addon:BuildMasterTab()
         addon:ImportRoster()
     end)
 
-    local broadcastRosterButton = createButton(panel, "Broadcast Roster", 130, 24)
-    broadcastRosterButton:SetPoint("LEFT", importRosterButton, "RIGHT", 8, 0)
-    broadcastRosterButton:SetScript("OnClick", function()
-        addon:BroadcastRoster()
-    end)
+    -- No Broadcast Roster button: roster edits auto-broadcast from whoever makes them
+    -- (GUEST_UPSERT from the Raiders tab add flow; guild data needs no push at all).
 
     local importNamedItemsButton = createButton(panel, "Import Named Items", 130, 24)
-    importNamedItemsButton:SetPoint("LEFT", broadcastRosterButton, "RIGHT", 8, 0)
+    importNamedItemsButton:SetPoint("LEFT", importRosterButton, "RIGHT", 8, 0)
     importNamedItemsButton:SetScript("OnClick", function()
         addon:ImportNamedItems()
     end)
@@ -139,7 +136,6 @@ function addon:BuildMasterTab()
     panel.exportWinnersButton = exportWinnersButton
     panel.exportLogButton = exportLogButton
     panel.importRosterButton = importRosterButton
-    panel.broadcastRosterButton = broadcastRosterButton
     panel.importNamedItemsButton = importNamedItemsButton
     panel.broadcastNamedItemsButton = broadcastNamedItemsButton
     panel.payoutButton = payoutButton
@@ -218,7 +214,6 @@ function addon:RefreshMasterTab()
         panel.scanButton:Enable()
         panel.processButton:Enable()
         panel.importRosterButton:Enable()
-        panel.broadcastRosterButton:Enable()
         panel.importNamedItemsButton:Enable()
         panel.broadcastNamedItemsButton:Enable()
         panel.payoutButton:Enable()
@@ -229,7 +224,6 @@ function addon:RefreshMasterTab()
         panel.scanButton:Disable()
         panel.processButton:Disable()
         panel.importRosterButton:Disable()
-        panel.broadcastRosterButton:Disable()
         panel.importNamedItemsButton:Disable()
         panel.broadcastNamedItemsButton:Disable()
         panel.payoutButton:Disable()

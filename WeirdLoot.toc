@@ -20,9 +20,9 @@ Core\Util.lua
 Core\Config.lua
 Core\Comm.lua
 Core\Roster.lua
+Core\GuildRoster.lua
 Core\Debug.lua
 
-Data\RosterDefaults.lua
 Data\BlacklistPresets.lua
 Data\BlacklistPresets\Priest.lua
 Data\BlacklistPresets\Mage.lua
@@ -56,3 +56,4 @@ UI\ResultsTab.lua
 UI\MasterTab.lua
 UI\OptionsTab.lua
 UI\LootTab.lua
+UI\GuildSpec.lua

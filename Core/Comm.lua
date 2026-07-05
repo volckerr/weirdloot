@@ -502,6 +502,36 @@ function addon:BroadcastRoster()
     self:Print("Broadcast roster sent to raid.")
 end
 
+-- One roster entry, pushed by whoever edited it to the whole raid. Unlike ROSTER_SYNC (a
+-- full-text ML mirror), this is a single upsert accepted from any authorized editor (ML or
+-- guild leadership), so leadership can register a mid-raid guest without routing through the
+-- ML. Sender applies locally first; receivers converge via OnGuestUpsert.
+function addon:SendGuestUpsert(entry)
+    self:SendLargeMessage("GUEST_UPSERT", {
+        entry.name or "",
+        entry.className or "",
+        entry.specName or "",
+        entry.status or "nil",
+    }, "RAID")
+end
+
+function addon:OnGuestUpsert(sender, fields)
+    local senderKey = util:NormalizeKey(sender or "")
+    local isLootMaster = senderKey ~= "" and senderKey == util:NormalizeKey(self:GetLootMasterName() or "")
+    if not isLootMaster and not self:IsGuildLeadership(sender) then
+        return
+    end
+    local name = fields[1] or ""
+    if name == "" then return end
+    self:UpsertRosterEntry({
+        name = name,
+        className = self:NormalizeClassName(fields[2] or ""),
+        specName = util:NormalizeKey(fields[3] or ""),
+        status = self:NormalizeStatus(fields[4] or ""),
+    })
+    self:Print(string.format("Roster: %s updated by %s.", util:TitleCaseWords(name), sender or "?"))
+end
+
 -- Live pick list for a rolling lot, pushed ML -> raid as an EPHEMERAL, display-only signal so
 -- raiders can see who is rolling in real time. Picks are otherwise coalesced (they do not sync
 -- until the roll resolves), so without this a raider's popup would show a frozen ~0 count. This
@@ -577,5 +607,13 @@ function addon:HandleCommMessage(sender, value)
         self:OnCancelMessage(fields)
     elseif command == "RSTATE" then
         self:OnRollStateMessage(fields)
+    elseif command == "GUEST_UPSERT" then
+        self:OnGuestUpsert(sender, fields)
+    elseif command == "GNOTES_REQ" then
+        self:OnGuildNotesRequest(sender)
+    elseif command == "GNOTES" then
+        -- fields[1] is a structured value (name -> {s, o} map), not a stringified arg: the
+        -- relay sends via comm:Send directly, bypassing SendLargeMessage's tostring pass.
+        self:OnGuildNotesData(sender, fields[1])
     end
 end

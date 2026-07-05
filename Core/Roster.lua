@@ -80,6 +80,15 @@ function addon:BuildRosterDisplay(attendeesByName)
         end
     end
 
+    -- A guest is a present player the guild doesn't know with no spec assigned yet: the
+    -- entries leadership still has to handle. The Raiders tab floats them to the top until a
+    -- spec lands (via the add flow or a GUEST_UPSERT), at which point they sort normally.
+    for _, entry in ipairs(display) do
+        entry.isGuest = entry.present
+            and not (self.GetGuildMemberProfile and self:GetGuildMemberProfile(entry.name))
+            and (entry.specName or "") == ""
+    end
+
     table.sort(display, function(left, right)
         if left.present ~= right.present then
             return left.present

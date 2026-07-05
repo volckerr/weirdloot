@@ -343,6 +343,10 @@ function addon:InitializeUI()
 
     self:SelectTab(self.ui.selectedTab)
     self:RefreshUI()
+
+    if self.InitializeGuildSpecUI then
+        self:InitializeGuildSpecUI()
+    end
 end
 
 function addon:BuildBottomTabs()

@@ -111,4 +111,30 @@ H.test("minimap ML-active desaturation gates on a resolved loot master", functio
     H.check(true, "UpdateMinimapMLActive ran through both states")
 end)
 
+-- UI/RaidersTab.lua: unhandled guests float to the top in every sort mode; the raid-only
+-- toggle filters absent entries.
+H.test("Raiders tab: guests sort first and raid-only filters", function()
+    local w = uiWorld()
+    w.addon:InitializeUI()
+    w.addon.roster.rosterDisplay = {
+        { name = "aaron", present = true, isGuest = false, className = "mage", specName = "fire", status = "main", source = "configured" },
+        { name = "benched", present = false, isGuest = false, className = "rogue", specName = "combat", status = "main", source = "configured" },
+        { name = "zug", present = true, isGuest = true, className = "warrior", specName = "", status = "main", source = "unconfigured" },
+    }
+    w.addon.db.ui.rosterSortMode = "name"
+    w.addon.db.ui.rosterRaidOnly = false
+    local sorted = w.addon:GetSortedRosterEntries()
+    H.eq(sorted[1].name, "zug", "guest floats above alphabetical sort")
+    H.eq(#sorted, 3, "no filter keeps every entry")
+
+    w.addon.db.ui.rosterRaidOnly = true
+    sorted = w.addon:GetSortedRosterEntries()
+    H.eq(#sorted, 2, "raid-only drops absent entries")
+    H.eq(sorted[1].name, "zug", "guest still first")
+
+    w.addon.db.ui.rosterRaidOnly = false
+    w.addon:RefreshRaidersTab()
+    H.check(true, "RefreshRaidersTab renders guest rows without error")
+end)
+
 F.endSuite()

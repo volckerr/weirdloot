@@ -427,6 +427,11 @@ function addon:StartLootSession()
         return
     end
 
+    -- Session start is the moment fresh note data matters most: re-query the guild and, if
+    -- this ML can't read officer notes itself, ask an officer for the relayed map.
+    self:RequestGuildRoster()
+    self:RequestGuildNotes()
+
     local sessionId = self:NextEpoch()
     self.session.id = sessionId
     self.session.active = true

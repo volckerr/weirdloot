@@ -252,18 +252,17 @@ end
 function addon:NormalizeAllConfig()
     local rosterEntries = self.config.rosterEntries
 
-    -- Single roster source: whatever lives in self.config.rosterEntries. The PLAYER_LOGIN
-    -- migration handles the one-time switch from legacy saved data to the curated default; from
-    -- then on this function trusts the saved entries. If they're missing/empty (fresh install
-    -- with no defaults yet, or a roster nuked by hand), reparse the saved import text or fall
-    -- back to the curated default.
+    -- The saved entries are the guest/override layer beneath the guild-derived roster (see
+    -- GetRosterProfile); there is no shipped default to fall back to. If they're missing/empty
+    -- (fresh install, or a roster nuked by hand), reparse the saved import text; an empty
+    -- roster is a valid state (guild data carries the raiders).
     if type(rosterEntries) ~= "table" or #rosterEntries == 0 then
         local rosterImportText = self.config.rosterImportText or ""
         if rosterImportText ~= "" then
             rosterEntries = self:ParseRosterImport(rosterImportText)
         end
-        if type(rosterEntries) ~= "table" or #rosterEntries == 0 then
-            rosterEntries = util:CloneTable(self.defaultRosterEntries or {})
+        if type(rosterEntries) ~= "table" then
+            rosterEntries = {}
         end
     end
 
@@ -396,6 +395,34 @@ function addon:SaveRosterText(rosterText, suppressPrint)
     end
 end
 
+-- Add or replace ONE roster entry by name: the guest layer's on-the-fly write. Used by the
+-- Raiders tab add flow and the GUEST_UPSERT comm handler, so an edit made by any authorized
+-- client converges everywhere without a full-roster broadcast.
+function addon:UpsertRosterEntry(entry)
+    if type(entry) ~= "table" or (entry.name or "") == "" then
+        return false
+    end
+    local key = util:NormalizeKey(entry.name)
+    local entries = self.config.rosterEntries or {}
+    local replaced = false
+    for index, existing in ipairs(entries) do
+        if util:NormalizeKey(existing.name or "") == key then
+            entries[index] = entry
+            replaced = true
+            break
+        end
+    end
+    if not replaced then
+        entries[#entries + 1] = entry
+    end
+    self.config.rosterEntries = entries
+    self.config.revision = (self.config.revision or 0) + 1
+    self:NormalizeAllConfig()
+    self:RefreshRoster()
+    self:TriggerCallback("CONFIG_UPDATED")
+    return true
+end
+
 function addon:SaveNamedItemsText(namedText, suppressPrint)
     self.config.namedItemsText = namedText or ""
     self.config.revision = (self.config.revision or 0) + 1
@@ -411,7 +438,32 @@ function addon:GetRosterProfile(playerName)
     if not playerName then
         return nil
     end
-    return self.config.roster[util:NormalizeKey(playerName)]
+    local configured = self.config.roster[util:NormalizeKey(playerName)]
+
+    -- Guild data is authoritative for guild members: rank (plus any officer-note override)
+    -- decides status, the note token decides spec. The configured roster stays the source for
+    -- guests, and fills in a spec the note doesn't provide yet, so an unpopulated officer note
+    -- degrades to the configured spec instead of blanking it. Spec fill only when the classes
+    -- agree: a stale configured entry for a rerolled name must not graft a foreign spec.
+    local guildProfile = self.GetGuildMemberProfile and self:GetGuildMemberProfile(playerName)
+    if not guildProfile then
+        return configured
+    end
+    if guildProfile.specName ~= ""
+        or not configured
+        or (configured.specName or "") == ""
+        or configured.className ~= guildProfile.className then
+        return guildProfile
+    end
+    return {
+        name = guildProfile.name,
+        className = guildProfile.className,
+        specName = configured.specName,
+        status = guildProfile.status,
+        rankName = guildProfile.rankName,
+        rankIndex = guildProfile.rankIndex,
+        online = guildProfile.online,
+    }
 end
 
 function addon:GetLootRule(itemName)
