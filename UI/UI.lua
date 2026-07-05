@@ -2,7 +2,7 @@ local addon = WeirdLoot
 local util = addon.util
 
 local ROW_HEIGHT = 22
-local TAB_KEYS = { "loot", "results", "raiders", "master", "options" }
+local TAB_KEYS = { "loot", "results", "master", "raiders", "options" }
 local TAB_LABELS = {
     loot = "Loot",
     raiders = "Roster",
@@ -355,6 +355,13 @@ function addon:BuildBottomTabs()
         local tab = createButton(self.ui.frame, TAB_LABELS[key], 120, 24)
         if not previous then
             tab:SetPoint("BOTTOMLEFT", self.ui.frame, "BOTTOMLEFT", 16, 12)
+        elseif key == "master" then
+            -- Right group (Loot Master / Roster / Options) splits play-time tabs from
+            -- management tabs: 2 button widths minus the half-width pull-back on this pair.
+            tab:SetPoint("LEFT", previous, "RIGHT", 8 + 240 - 60, 0)
+        elseif key == "options" then
+            -- Re-add the pair's half-width pull-back so Options keeps its original spot.
+            tab:SetPoint("LEFT", previous, "RIGHT", 8 + 60, 0)
         else
             tab:SetPoint("LEFT", previous, "RIGHT", 8, 0)
         end
