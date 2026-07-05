@@ -140,8 +140,43 @@ end
 -- online }. Kept separate from self.roster (raid attendance): this is the candidate pool the
 -- profile lookup will draw from, refreshed on GUILD_ROSTER_UPDATE. Also records the observed
 -- rank ladder (index -> name) so /wl guild can show it for verifying the two config indices.
+-- How long a borrow may wait for its GUILD_ROSTER_UPDATE before the watchdog returns the
+-- player's filter anyway. Repeat GuildRoster() calls inside the server's ~10s throttle window
+-- are silently eaten (login then session-start requests back-to-back), so a borrow can be
+-- left with no reply ever coming.
+local GUILD_SCAN_BORROW_TIMEOUT = 3
+
+-- SetGuildRosterShowOffline dispatches GUILD_ROSTER_UPDATE SYNCHRONOUSLY (proven by an
+-- in-game stack trace re-entering our handler mid-call), and that re-entrant scan sees stale
+-- data and used to consume the borrow before its real reply. All writes go through here: the
+-- flag is up only for the duration of the C call, so the handler can drop exactly the bogus
+-- re-entrant dispatches and nothing else.
+local function writeShowOffline(self, value)
+    if not SetGuildRosterShowOffline then return end
+    self._guildFilterWriting = true
+    SetGuildRosterShowOffline(value)
+    self._guildFilterWriting = nil
+end
+
+-- Close a borrow: put the player's roster filter back and clear the pending record.
+local function closeGuildScanBorrow(self, why)
+    local restore = self.guildScanRestore
+    if not restore then return end
+    self.guildScanRestore = nil
+    local wroteOff = false
+    if SetGuildRosterShowOffline and not restore.showOffline then
+        writeShowOffline(self, false)
+        wroteOff = true
+    end
+    self:LogCoreEvent("gshow", { op = "close", why = why or "?",
+        captured = restore.showOffline and 1 or 0, wroteOff = wroteOff and 1 or 0 })
+end
+
 function addon:RefreshGuildRoster()
     if not (IsInGuild and IsInGuild()) then
+        -- A transiently unreadable guild state must not strand a pending borrow with the
+        -- player's filter flipped.
+        closeGuildScanBorrow(self, "noguild")
         self.guildRoster = nil
         return
     end
@@ -149,13 +184,16 @@ function addon:RefreshGuildRoster()
     local canViewNotes = (CanViewOfficerNote and CanViewOfficerNote()) and true or false
     local members = {}
     local rankNames = {}
-    -- No args in 3.3.5: whether offline members are counted follows SetGuildRosterShowOffline
-    -- (set true in RequestGuildRoster).
+    -- No args in 3.3.5: whether offline members are listed follows the show-offline filter,
+    -- which RequestGuildRoster borrows on (the filter is NOT synchronous: reads only reflect
+    -- a change after the server's next roster update, so same-call flip-and-read captures
+    -- the stale filtered list).
     local count = (GetNumGuildMembers and GetNumGuildMembers()) or 0
 
     -- A blind client substitutes the relayed note data (see the relay section below) so specs
     -- and overrides survive not having note permission; live reads always win when available.
     local cache = (not canViewNotes) and self:GetGuildNotesCache() or nil
+    local cacheHits = 0
 
     for index = 1, count do
         local name, rankName, rankIndex, _, classLocalized, _, _, officerNote, online, _, classFileName = GetGuildRosterInfo(index)
@@ -171,6 +209,7 @@ function addon:RefreshGuildRoster()
                 specName = cache.notes[nameKey].s or ""
                 statusOverride = cache.notes[nameKey].o
                 noteDataAvailable = true
+                cacheHits = cacheHits + 1
             end
             members[nameKey] = {
                 noteDataAvailable = noteDataAvailable,   -- gates override auto-clear: rank alone is never evidence enough
@@ -190,11 +229,10 @@ function addon:RefreshGuildRoster()
     end
 
     -- A scan is FULL only when it belongs to one of our own borrow cycles (we forced the
-    -- show-offline filter on before requesting, so the listing provably includes offline
-    -- members). The getter cannot be trusted as the signal: flipping the Blizzard checkbox
-    -- fires GUILD_ROSTER_UPDATE mid-transition, and misreading a filtered list as full
-    -- wholesale-drops every offline member. Non-borrow scans always merge; members who left
-    -- the guild are dropped by the next borrow (login, session start, /wl guild).
+    -- show-offline filter on before requesting, so this listing provably includes offline
+    -- members). Other scans may be running against the player's own online-only view, so
+    -- they merge over the previous map instead of replacing it: offline members captured by
+    -- the last full scan survive, flagged offline. Leavers drop on the next borrow.
     local fullScan = self.guildScanRestore ~= nil
     if not fullScan and self.guildRoster and self.guildRoster.members then
         for nameKey, existing in pairs(self.guildRoster.members) do
@@ -215,16 +253,29 @@ function addon:RefreshGuildRoster()
         canViewNotes = canViewNotes,
         memberCount = count,
         rankNames = rankNames,
+        -- Completeness is a mechanical fact only this client knows: a borrow cycle closed,
+        -- so the map provably covered the whole guild at least once. Carried across partial
+        -- merges; declared on served payloads so a blind ML can stamp its need fulfilled on
+        -- fresher information than its own (possibly stale) map count.
+        hadFullScan = fullScan or (self.guildRoster and self.guildRoster.hadFullScan) or false,
     }
 
-    -- End of a borrow cycle: put the player's roster view filter back the way it was.
-    if self.guildScanRestore then
-        local restore = self.guildScanRestore
-        self.guildScanRestore = nil
-        if SetGuildRosterShowOffline and not restore.showOffline then
-            SetGuildRosterShowOffline(false)
+    -- map/spec are post-merge: map is what the Roster tab counts and what a GNOTES payload
+    -- iterates; spec is exactly the entry count a payload built right now would carry.
+    local mapCount, specCount = 0, 0
+    for _, member in pairs(members) do
+        mapCount = mapCount + 1
+        if member.specName ~= "" or member.noteStatus then
+            specCount = specCount + 1
         end
     end
+    self:LogCoreEvent("gscan", { n = count, borrow = self.guildScanRestore and 1 or 0,
+        raw = (GetGuildRosterShowOffline and GetGuildRosterShowOffline()) and 1 or 0,
+        view = canViewNotes and 1 or 0, cachehits = cacheHits,
+        map = mapCount, spec = specCount })
+
+    -- End of a borrow cycle: put the player's roster view filter back the way it was.
+    closeGuildScanBorrow(self, "scan")
 
     self:AutoClearMatchedOverrides()
     -- Note-readers never write the cache: they serve requests straight from the live scan
@@ -299,20 +350,58 @@ function addon:GetGuildMemberProfile(playerName)
     return roster.members[util:NormalizeKey(playerName)]
 end
 
+-- Watchdog tick, also driven directly by tests. Returns true when there is nothing left to
+-- watch (no borrow pending, or it just expired and was closed).
+function addon:TickGuildScanBorrow(now)
+    local restore = self.guildScanRestore
+    if not restore then
+        return true
+    end
+    now = now or ((GetTime and GetTime()) or 0)
+    if restore.expiresAt and now >= restore.expiresAt then
+        closeGuildScanBorrow(self, "watchdog")
+        return true
+    end
+    return false
+end
+
+local function armGuildScanWatchdog(self)
+    if not CreateFrame then return end   -- out-of-game harness: tests drive TickGuildScanBorrow directly
+    if not self._guildScanWatchdog then
+        local frame = CreateFrame("Frame")
+        frame:Hide()   -- hidden frames get no OnUpdate; Show() arms, Hide() disarms
+        frame:SetScript("OnUpdate", function()
+            if addon:TickGuildScanBorrow() then
+                frame:Hide()
+            end
+        end)
+        self._guildScanWatchdog = frame
+    end
+    self._guildScanWatchdog:Show()
+end
+
 -- Ask the server for guild data (throttled server-side; the reply fires GUILD_ROSTER_UPDATE,
 -- which is where the scan actually runs). Offline members must be included (absent raiders
 -- still resolve profiles), but show-offline is the PLAYER'S roster view filter, so this is a
 -- borrow: remember their setting, flip on for the capture, and RefreshGuildRoster restores it
--- once the reply lands.
+-- once the reply lands -- or the watchdog does, if the throttle ate the request.
 function addon:RequestGuildRoster()
     if not (IsInGuild and IsInGuild()) then
         return
     end
     if SetGuildRosterShowOffline and GetGuildRosterShowOffline then
-        if not self.guildScanRestore then
+        local fresh = not self.guildScanRestore
+        if fresh then
             self.guildScanRestore = { showOffline = GetGuildRosterShowOffline() and true or false }
         end
-        SetGuildRosterShowOffline(true)
+        -- Locals captured BEFORE the write: the synchronous dispatch (see writeShowOffline)
+        -- must not be able to consume state this function still reads.
+        local captured = self.guildScanRestore.showOffline
+        self.guildScanRestore.expiresAt = ((GetTime and GetTime()) or 0) + GUILD_SCAN_BORROW_TIMEOUT
+        armGuildScanWatchdog(self)
+        writeShowOffline(self, true)
+        self:LogCoreEvent("gshow", { op = "borrow", fresh = fresh and 1 or 0,
+            captured = captured and 1 or 0 })
     end
     if GuildRoster then
         GuildRoster()
@@ -328,23 +417,61 @@ end
 -- degrades to the cached (possibly stale) data instead of blank specs. Multiple repliers are
 -- fine: payloads are identical, last write wins.
 
--- The relayable subset of the current scan: members whose note carries a spec or an override.
--- nil when this client cannot read notes (nothing trustworthy to serve).
+-- The full member map as the officer sees it: note-derived fields (s/o) plus the public
+-- identity fields (nm/c/r), so a blind receiver can create rows outright for members its
+-- own scan never captured (a failed login borrow leaves the map thin). Rank travels as
+-- index only: both sides share the guild's ladder, so the receiver resolves the name from
+-- its own rankNames. nil when this client cannot read notes (nothing trustworthy to serve).
 function addon:BuildGuildNotesPayload()
     local roster = self.guildRoster
     if not roster or not roster.canViewNotes then
         return nil
     end
-    local notes = {}
+    local notes, n = {}, 0
     for nameKey, member in pairs(roster.members) do
-        if member.specName ~= "" or member.noteStatus then
-            notes[nameKey] = {
-                s = member.specName ~= "" and member.specName or nil,
-                o = member.noteStatus,
+        notes[nameKey] = {
+            s = member.specName ~= "" and member.specName or nil,
+            o = member.noteStatus,
+            nm = member.name,
+            c = member.className,
+            r = member.rankIndex,
+        }
+        n = n + 1
+    end
+    return notes, n, roster.hadFullScan and true or false
+end
+
+-- Officers are authoritative: fold a received payload straight into the member map,
+-- creating rows for members our own scan never captured. The post-receive scan cannot be
+-- trusted to do this -- its listing follows the player's own (usually online-only)
+-- filter, so most members never pass through the substitution loop (proven live:
+-- 87 entries delivered, 2 applied, because the listing held 3 names at that moment).
+-- Created rows start offline; presence is volatile and the next scan corrects it.
+function addon:ApplyGuildNotesToRoster(notes)
+    local roster = self.guildRoster
+    if not roster or roster.canViewNotes then return 0 end   -- live reads always win
+    local applied = 0
+    for nameKey, entry in pairs(notes) do
+        local member = roster.members[nameKey]
+        if not member and entry.nm then
+            member = {
+                name = entry.nm,
+                className = entry.c or "",
+                rankIndex = entry.r,
+                rankName = entry.r ~= nil and roster.rankNames[entry.r] or nil,
+                online = false,
             }
+            roster.members[nameKey] = member
+        end
+        if member then
+            member.specName = entry.s or ""
+            member.noteStatus = entry.o
+            member.status = entry.o or self:GuildRankStatus(member.rankIndex)
+            member.noteDataAvailable = true
+            applied = applied + 1
         end
     end
-    return notes
+    return applied
 end
 
 function addon:StoreGuildNotesCache(notes, from)
@@ -367,27 +494,131 @@ function addon:RequestGuildNotes()
     self:LogCoreEvent("send", { cmd = "GNOTES_REQ", dist = "GUILD" })
 end
 
-function addon:OnGuildNotesRequest(sender)
-    local payload = self:BuildGuildNotesPayload()
-    if not payload or not self.comm then return end   -- blind ourselves: nothing to serve
-    self.comm:Send({ "GNOTES", payload }, "WHISPER", sender, "BULK")
-    self:LogCoreEvent("send", { cmd = "GNOTES", dist = "WHISPER" })
+-- Guild-wide BACKUP retry while the session need stands (the primary triggers stay: the
+-- one-shot authority-gain request and the snapshot need-flag at officer join). The
+-- need-flag paths reach only raid members; an officer outside the raid, or one who logged
+-- in after the one-shot request, is reachable only on GUILD. 30s cadence (matches the
+-- sync heartbeat); the REQ line is ~20 bytes and responders skip unchanged re-serves, so
+-- the standing poll is nearly free. Fulfillment (the OnGuildNotesData stamp) stops it.
+function addon:MaybeRepollGuildNotes()
+    if not (self.session and self.session.active) then return end
+    if not (self.IsAuthorizedLootMaster and self:IsAuthorizedLootMaster()) then return end
+    if not (self.SyncNeedsNotes and self:SyncNeedsNotes()) then return end
+    local now = (GetTime and GetTime()) or 0
+    if self._gnotesPollAt and now < self._gnotesPollAt + 30 then return end
+    self._gnotesPollAt = now
+    self:RequestGuildNotes()
 end
 
-function addon:OnGuildNotesData(sender, notes)
-    if type(notes) ~= "table" then return end
+-- Self-driving tick for the repoll (coarse: the 60s throttle above does the real pacing).
+if CreateFrame then
+    local poller = CreateFrame("Frame")
+    local acc = 0
+    poller:SetScript("OnUpdate", function(_, elapsed)
+        acc = acc + (elapsed or 0)
+        if acc < 5 then return end
+        acc = 0
+        if addon and addon.MaybeRepollGuildNotes then addon:MaybeRepollGuildNotes() end
+    end)
+end
+
+function addon:OnGuildNotesRequest(sender)
+    local payload, n, full = self:BuildGuildNotesPayload()
+    if not payload or not self.comm then   -- blind ourselves: nothing to serve
+        self:LogCoreEvent("gnotes_skip", { why = "blind", to = sender or "?" })
+        return
+    end
+    -- Serve on first ask or on improvement: a polling ML re-asks every 30s while its
+    -- need stands, and re-whispering an unchanged payload each poll is pure waste. Size +
+    -- completeness is signature enough: a borrow completing or membership changing alters
+    -- it, which are exactly the improvements that could newly fulfill the ML.
+    local sig = tostring(n) .. (full and "+f" or "")
+    local key = util:NormalizeKey(sender or "")
+    self._gnotesServedSig = self._gnotesServedSig or {}
+    if self._gnotesServedSig[key] == sig then
+        self:LogCoreEvent("gnotes_skip", { why = "unchanged", to = sender or "?" })
+        return
+    end
+    self._gnotesServedSig[key] = sig
+    self.comm:Send({ "GNOTES", payload, full and 1 or 0 }, "WHISPER", sender, "BULK")
+    self:LogCoreEvent("send", { cmd = "GNOTES", dist = "WHISPER", n = n, full = full and 1 or 0 })
+end
+
+function addon:OnGuildNotesData(sender, notes, full)
+    if type(notes) ~= "table" then
+        self:LogCoreEvent("gnotes_recv", { from = sender or "?", ok = 0, why = "type" })
+        return
+    end
     -- Note data must come from a guildmate: a non-member whisper can't be carrying officer
     -- notes we'd want. (Membership is the strongest check available remotely: note-READ
     -- permission itself isn't queryable for other players.)
-    if not self:GetGuildMemberProfile(sender) then return end
+    if not self:GetGuildMemberProfile(sender) then
+        self:LogCoreEvent("gnotes_recv", { from = sender or "?", ok = 0, why = "notguild" })
+        return
+    end
+    local n = 0
+    for _ in pairs(notes) do n = n + 1 end
+    -- Fulfillment yardstick, measured BEFORE the apply (which can grow the map): the merged
+    -- map preserves the login full-scan count across online-filtered partial listings, so it
+    -- is the initial roster size; listing counts are unusable for this.
+    local mapCount = 0
+    if self.guildRoster and self.guildRoster.members then
+        for _ in pairs(self.guildRoster.members) do mapCount = mapCount + 1 end
+    end
     self:StoreGuildNotesCache(notes, sender)
+    local applied = self:ApplyGuildNotesToRoster(notes)
+    -- Fulfillment: the sender's completeness declaration wins when present (its map came
+    -- from a completed full borrow scan: fresher membership truth than our own count, which
+    -- goes stale the moment someone leaves the guild). Without it, fall back to comparing
+    -- against our own map: a smaller payload is a thin serve (the sender's scan raced), so
+    -- apply what came but keep the session need flying for a fuller serve.
+    local fullServe = (full == 1 or full == "1" or full == true) and 1 or 0
+    local stamped = 0
+    if self.session and self.session.active and (fullServe == 1 or n >= mapCount) then
+        self._gnotesSessionId = self.session.id
+        stamped = 1
+    end
+    -- The payload table rides in the record by reference (safe: it is only ever replaced
+    -- whole, never mutated), so the log itself answers WHICH members were delivered.
+    self:LogCoreEvent("gnotes_recv", { from = sender or "?", ok = 1, n = n, applied = applied,
+        map = mapCount, full = fullServe, stamped = stamped, notes = notes })
     self:RefreshGuildRoster()
     if self.roster then
         self:RefreshRoster()
     end
 end
 
+-- Officer side of the session need-flag: a snapshot whose meta says the ML lacks note data
+-- is an implicit request, so a note-reading receiver whispers the map unprompted. Served at
+-- most once per session epoch, with a cooldown so a re-flagged snapshot (lost whisper) can
+-- retry without spamming every resync.
+function addon:MaybeServeGuildNotes(mlName, epoch)
+    if not mlName or mlName == "" then return end
+    local payload, n, full = self:BuildGuildNotesPayload()
+    if not payload or not self.comm then
+        self:LogCoreEvent("gnotes_skip", { why = "blind", to = mlName })
+        return
+    end
+    local now = (GetTime and GetTime()) or 0
+    if self._gnotesServedEpoch == epoch and self._gnotesServedAt and now < self._gnotesServedAt + 60 then
+        self:LogCoreEvent("gnotes_skip", { why = "cooldown", to = mlName })
+        return
+    end
+    self._gnotesServedEpoch = epoch
+    self._gnotesServedAt = now
+    -- Shared signature with the REQ path: a guild poll landing right after this join-time
+    -- serve must not whisper the identical payload again.
+    self._gnotesServedSig = self._gnotesServedSig or {}
+    self._gnotesServedSig[util:NormalizeKey(mlName)] = tostring(n) .. (full and "+f" or "")
+    self.comm:Send({ "GNOTES", payload, full and 1 or 0 }, "WHISPER", mlName, "BULK")
+    self:LogCoreEvent("send", { cmd = "GNOTES", dist = "WHISPER", why = "needflag", n = n, full = full and 1 or 0 })
+end
+
 function addon:GUILD_ROSTER_UPDATE()
+    -- A dispatch arriving while one of our own filter writes is mid-call is the synchronous
+    -- re-entrant kind: it describes the PRE-write list and consuming it would close the
+    -- borrow before its real reply. Queued events arrive with the flag down.
+    if self._guildFilterWriting then return end
     self:RefreshGuildRoster()
     -- Attendee profiles resolve through GetRosterProfile, which prefers guild data: a rank or
     -- note edit must re-derive the raid roster, not wait for the next RAID_ROSTER_UPDATE.

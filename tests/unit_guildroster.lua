@@ -518,13 +518,16 @@ H.test("OnRosterOverride: officer gate, officer-sent clear converges", function(
 end)
 
 ------------------------------------------------------------------------
--- Show-offline borrow: request flips it on, refresh restores the player's
--- setting, and offline-hidden rescans merge instead of clobbering
+-- Show-offline borrow: request flips it on (the filter is NOT synchronous,
+-- so a same-call flip-and-read captures the stale filtered list), the
+-- reply scan restores it, the watchdog covers starved requests, and
+-- offline-hidden rescans merge instead of clobbering
 ------------------------------------------------------------------------
 H.test("RequestGuildRoster: borrows show-offline and refresh restores it", function()
     installGuildApi(true)
     showOffline = false                     -- player runs with offline hidden
     addon.guildRoster = nil
+    addon.guildScanRestore = nil
     addon:RequestGuildRoster()
     H.eq(showOffline, true, "flipped on for the capture")
     addon:RefreshGuildRoster()              -- the reply lands: full scan
@@ -533,14 +536,68 @@ H.test("RequestGuildRoster: borrows show-offline and refresh restores it", funct
     H.eq(addon.guildScanRestore, nil, "borrow cycle closed")
 end)
 
+H.test("synchronous re-entrant dispatch from Set cannot consume the borrow", function()
+    installGuildApi(true)
+    addon.config = fullConfig()
+    addon:InitializeRoster()
+    showOffline = false
+    addon.guildScanRestore = nil
+    -- The client dispatches GUILD_ROSTER_UPDATE synchronously from inside Set (in-game
+    -- proven by a stack trace); model that exactly.
+    local baseSet = env.SetGuildRosterShowOffline
+    env.SetGuildRosterShowOffline = function(v)
+        baseSet(v)
+        addon:GUILD_ROSTER_UPDATE()
+    end
+
+    addon:RequestGuildRoster()
+    H.eq(addon.guildScanRestore ~= nil, true, "borrow survives the re-entrant dispatch")
+    H.eq(showOffline, true, "filter still flipped, awaiting the real reply")
+
+    env.SetGuildRosterShowOffline = baseSet
+    addon:RefreshGuildRoster()               -- the genuine server reply
+    H.eq(showOffline, false, "restored by the real scan")
+    H.eq(addon:GetGuildMemberProfile("Achera").online, false, "full capture intact")
+    showOffline = true
+end)
+
+H.test("borrow watchdog: a starved request restores the filter on expiry", function()
+    installGuildApi(true)
+    showOffline = false
+    addon.guildScanRestore = nil
+    addon:RequestGuildRoster()              -- request whose GuildRoster() the server throttle eats
+    H.eq(showOffline, true, "filter borrowed")
+    H.eq(addon:TickGuildScanBorrow(1), false, "before expiry: still waiting")
+    H.eq(addon:TickGuildScanBorrow(10), true, "past expiry: watchdog closes the borrow")
+    H.eq(showOffline, false, "player's setting restored despite no scan ever arriving")
+    H.eq(addon.guildScanRestore, nil, "borrow record cleared")
+    showOffline = true
+end)
+
+H.test("borrow restore survives a transient not-in-guild refresh", function()
+    installGuildApi(true)
+    showOffline = false
+    addon.guildScanRestore = nil
+    addon:RequestGuildRoster()
+    H.eq(showOffline, true, "filter borrowed")
+    env.IsInGuild = function() return false end   -- login-race blip
+    addon:RefreshGuildRoster()
+    H.eq(showOffline, false, "early-return path still restores the filter")
+    H.eq(addon.guildScanRestore, nil, "borrow closed")
+    env.IsInGuild = function() return true end
+    showOffline = true
+end)
+
 H.test("RefreshGuildRoster: offline-hidden rescan merges over the full map", function()
     installGuildApi(true)
     addon.guildRoster = nil
-    addon:RefreshGuildRoster()              -- full scan (show-offline on)
+    addon.guildScanRestore = nil
+    addon:RequestGuildRoster()
+    addon:RefreshGuildRoster()              -- borrow cycle: provably full scan
     H.eq(addon:GetGuildMemberProfile("Achera").specName, "frost", "offline member in full map")
 
     showOffline = false                     -- player's own view: online only
-    addon:RefreshGuildRoster()
+    addon:RefreshGuildRoster()              -- spontaneous update, not ours: merges
     local achera = addon:GetGuildMemberProfile("Achera")
     H.eq(achera.specName, "frost", "offline member survives the partial rescan")
     H.eq(achera.online, false, "absent from an online-only listing = offline")
@@ -626,21 +683,46 @@ end)
 -- Officer-note relay: payload, cache harvest, blind-client substitution,
 -- request/reply handlers
 ------------------------------------------------------------------------
-H.test("BuildGuildNotesPayload: noted members only; nil when blind", function()
+H.test("BuildGuildNotesPayload: full records for every member; nil when blind", function()
     installGuildApi(true)
     addon.db = {}
     addon:RefreshGuildRoster()
-    local payload = addon:BuildGuildNotesPayload()
+    local payload, n = addon:BuildGuildNotesPayload()
+    H.eq(n, 4, "every member carried, not just noted ones")
     H.eq(payload.uzragol.s, "elemental", "spec carried")
     H.eq(payload.uzragol.o, nil, "no override for plain members")
+    H.eq(payload.uzragol.nm, "Uzragol", "display name carried")
+    H.eq(payload.uzragol.c, "shaman", "class carried")
+    H.eq(payload.uzragol.r, 6, "rank index carried (name resolves from the shared ladder)")
     H.eq(payload.bosslady.s, "blood", "override member spec carried")
     H.eq(payload.bosslady.o, "designatedalt", "status override carried")
-    H.eq(payload.newguy, nil, "tokenless member omitted")
+    H.eq(payload.newguy.s, nil, "tokenless member included, spec absent")
+    H.eq(payload.newguy.nm, "Newguy", "tokenless member identity still carried")
 
     installGuildApi(false)
     addon.db = nil
     addon:RefreshGuildRoster()
     H.eq(addon:BuildGuildNotesPayload(), nil, "blind client serves nothing")
+end)
+
+H.test("BuildGuildNotesPayload: completeness declared only after a borrow-backed scan", function()
+    installGuildApi(true)
+    addon.guildRoster = nil
+    addon.guildScanRestore = nil
+    addon:RefreshGuildRoster()                       -- plain scan: not borrow-backed
+    local _, _, full = addon:BuildGuildNotesPayload()
+    H.eq(full, false, "no completed borrow yet: not declared complete")
+
+    addon:RequestGuildRoster()
+    addon:RefreshGuildRoster()                       -- borrow cycle closes: provably full
+    local _, _, full2 = addon:BuildGuildNotesPayload()
+    H.eq(full2, true, "borrow-backed map declares complete")
+
+    showOffline = false
+    addon:RefreshGuildRoster()                       -- player's own online-only rescan
+    local _, _, full3 = addon:BuildGuildNotesPayload()
+    H.eq(full3, true, "declaration survives partial-scan merges")
+    showOffline = true
 end)
 
 H.test("RefreshGuildRoster: note-readers never write the cache", function()
@@ -708,6 +790,106 @@ H.test("relay handlers: request answered only by note-readers, data applies + pe
     addon.db = nil
 end)
 
+H.test("OnGuildNotesRequest: serves on first ask or improvement, skips unchanged re-polls", function()
+    local sent = {}
+    addon.comm = { Send = function(_, value, dist, target) sent[#sent + 1] = { value = value, target = target } end }
+    addon._gnotesServedSig = nil
+
+    installGuildApi(true)
+    addon.db = {}
+    addon.guildRoster = nil
+    addon.guildScanRestore = nil
+    addon:RefreshGuildRoster()                   -- plain scan: complete=false
+    addon:OnGuildNotesRequest("Pollingml")
+    H.eq(#sent, 1, "first ask served")
+    H.eq(sent[1].value[3], 0, "not borrow-backed yet: declared incomplete")
+
+    addon:OnGuildNotesRequest("Pollingml")
+    H.eq(#sent, 1, "unchanged payload: re-poll skipped")
+
+    addon:RequestGuildRoster()
+    addon:RefreshGuildRoster()                   -- borrow completes: payload improved
+    addon:OnGuildNotesRequest("Pollingml")
+    H.eq(#sent, 2, "improved (now complete) payload re-served")
+    H.eq(sent[2].value[3], 1, "completeness declared")
+
+    addon:OnGuildNotesRequest("Otherml")
+    H.eq(#sent, 3, "signature is per-target: a different ML is served fresh")
+
+    addon.comm = nil
+    addon.db = nil
+    addon._gnotesServedSig = nil
+end)
+
+H.test("MaybeRepollGuildNotes: polls GUILD while the need stands, stops when stamped", function()
+    local requests = 0
+    local savedReq, savedAuth = addon.RequestGuildNotes, addon.IsAuthorizedLootMaster
+    addon.RequestGuildNotes = function() requests = requests + 1 end
+    addon.IsAuthorizedLootMaster = function() return true end
+
+    installGuildApi(false)
+    addon.guildRoster = nil
+    addon:RefreshGuildRoster()                   -- blind roster: need can stand
+    addon.session = { id = "epoch-poll", active = true }
+    addon._gnotesSessionId = nil
+    addon._gnotesPollAt = nil
+
+    addon:MaybeRepollGuildNotes()
+    H.eq(requests, 1, "needy ML polls")
+    addon:MaybeRepollGuildNotes()
+    H.eq(requests, 1, "60s throttle holds")
+    addon._gnotesPollAt = -100
+    addon:MaybeRepollGuildNotes()
+    H.eq(requests, 2, "throttle expiry re-polls")
+
+    addon._gnotesSessionId = "epoch-poll"        -- fulfilled: need stamped
+    addon._gnotesPollAt = -100
+    addon:MaybeRepollGuildNotes()
+    H.eq(requests, 2, "stamped need stops the poll")
+
+    addon.RequestGuildNotes, addon.IsAuthorizedLootMaster = savedReq, savedAuth
+    addon.session = nil
+    addon._gnotesPollAt = nil
+end)
+
+H.test("ApplyGuildNotesToRoster: payload reaches members outside the current listing", function()
+    -- The live failure: the post-receive scan iterates the player's online-only listing,
+    -- so payload members not listed at that moment never got their specs applied.
+    installGuildApi(false)
+    addon.db = {}
+    addon:RefreshGuildRoster()                       -- full blind scan: 4 members, blank specs
+    env.SetGuildRosterShowOffline(false)             -- listing collapses to online-only
+
+    addon:OnGuildNotesData("Bosslady", {
+        achera   = { s = "unholy", nm = "Achera", c = "deathknight", r = 7 },   -- offline: not listed
+        uzragol  = { s = "elemental", nm = "Uzragol", c = "shaman", r = 6 },
+        ghostly  = { s = "frost", nm = "Ghostly", c = "mage", r = 6 },          -- never scanned at all
+    })
+
+    H.eq(addon:GetGuildMemberProfile("Achera").specName, "unholy", "unlisted (offline) member updated")
+    H.eq(addon:GetGuildMemberProfile("Achera").noteDataAvailable, true, "marked note-backed")
+    H.eq(addon:GetGuildMemberProfile("Uzragol").specName, "elemental", "listed member updated too")
+
+    -- Upsert-only: members absent from the payload are never deleted or blanked.
+    H.eq(addon:GetGuildMemberProfile("Newguy").name, "Newguy", "member missing from payload survives")
+    H.eq(addon:GetGuildMemberProfile("Bosslady").status, "unknown", "untouched member keeps its derived state")
+
+    local ghost = addon:GetGuildMemberProfile("Ghostly")
+    H.eq(ghost.name, "Ghostly", "row created from full payload record")
+    H.eq(ghost.className, "mage", "class from payload")
+    H.eq(ghost.status, "main", "status derived from payload rank index")
+    H.eq(ghost.rankName, "Raider", "rank name resolved from our own ladder")
+    H.eq(ghost.online, false, "created rows start offline until a real scan")
+
+    -- Sighted clients never let a whisper outvote their own live reads.
+    installGuildApi(true)
+    addon:RefreshGuildRoster()
+    H.eq(addon:ApplyGuildNotesToRoster({ uzragol = { s = "restoration" } }), 0, "live view wins")
+    H.eq(addon:GetGuildMemberProfile("Uzragol").specName, "elemental", "live spec untouched")
+
+    addon.db = nil
+end)
+
 ------------------------------------------------------------------------
 -- Legacy roster wipe: unconditional one-time delete at login (Core.lua),
 -- deliberately independent of guild data
@@ -748,6 +930,109 @@ H.test("RefreshLootAuthority: false->true ML transition requests guild notes", f
 
     w.addon:RefreshLootAuthority()               -- steady re-resolve: no transition
     H.eq(requests, 1, "no re-request without a transition")
+end)
+
+------------------------------------------------------------------------
+-- Session need-flag: a snapshot saying the ML lacks notes is an implicit
+-- request; note-readers whisper the map unprompted
+------------------------------------------------------------------------
+H.test("MaybeServeGuildNotes: note-readers answer once per epoch, blind clients never", function()
+    installGuildApi(true)
+    addon.config = fullConfig()
+    addon:RefreshGuildRoster()
+    addon._gnotesServedEpoch, addon._gnotesServedAt = nil, nil
+
+    local sent = {}
+    addon.comm = { Send = function(_, value, dist, target)
+        if value[1] == "GNOTES" then sent[#sent + 1] = { dist = dist, target = target } end
+    end }
+
+    addon:MaybeServeGuildNotes("Blindml", "epoch1")
+    H.eq(#sent, 1, "note-reader serves the flagged ML")
+    H.eq(sent[1].dist, "WHISPER", "served by whisper")
+    H.eq(sent[1].target, "Blindml", "to the ML")
+
+    addon:MaybeServeGuildNotes("Blindml", "epoch1")
+    H.eq(#sent, 1, "same epoch within cooldown: no repeat")
+
+    addon._gnotesServedAt = -100                       -- cooldown long past (lost-whisper retry)
+    addon:MaybeServeGuildNotes("Blindml", "epoch1")
+    H.eq(#sent, 2, "re-flagged snapshot after cooldown retries")
+
+    addon:MaybeServeGuildNotes("Blindml", "epoch2")
+    H.eq(#sent, 3, "a new session epoch is served fresh")
+
+    installGuildApi(false)
+    addon:RefreshGuildRoster()
+    addon._gnotesServedEpoch = nil
+    addon:MaybeServeGuildNotes("Blindml", "epoch3")
+    H.eq(#sent, 3, "a blind client has nothing to serve")
+
+    addon.comm = nil
+end)
+
+H.test("need-flag rides the snapshot M line and triggers the officer serve", function()
+    local ml = F.makeWorld("Masterlooter", true)
+    local officer = F.makeWorld("Officerguy", false)
+    F.startSession(ml)
+
+    -- ML is blind and this session has no notes yet.
+    ml.addon.guildRoster = { members = {}, canViewNotes = false }
+    ml.addon._gnotesSessionId = nil
+
+    local served = {}
+    officer.addon.MaybeServeGuildNotes = function(_, mlName, epoch)
+        served[#served + 1] = { mlName = mlName, epoch = epoch }
+    end
+
+    F.clearWire()
+    ml.addon:BroadcastSession()
+    F.flushWireTo(officer)
+    H.eq(#served, 1, "flagged snapshot triggers the serve")
+    H.eq(served[1].mlName, "Masterlooter", "aimed at the ML")
+
+    -- Satisfied ML: flag drops, no serve on the next snapshot.
+    ml.addon._gnotesSessionId = ml.addon.session.id
+    F.clearWire()
+    ml.addon:BroadcastSession()
+    F.flushWireTo(officer)
+    H.eq(#served, 1, "unflagged snapshot triggers nothing")
+end)
+
+H.test("fulfillment guard: only a payload equal to or larger than the initial map stamps the need", function()
+    installGuildApi(false)
+    addon.db = {}
+    addon.session = { id = "epoch-guard", active = true }
+    addon._gnotesSessionId = nil
+    addon.guildRoster = nil                          -- drop prior tests' merged leftovers
+    addon:RefreshGuildRoster()                       -- full blind scan: map of 4
+
+    -- Thin serve (the officer's own scan raced): applied, but the need keeps flying.
+    addon:OnGuildNotesData("Bosslady", {
+        uzragol = { s = "elemental", nm = "Uzragol", c = "shaman", r = 6 },
+    })
+    H.eq(addon:GetGuildMemberProfile("Uzragol").specName, "elemental", "thin payload still applies")
+    H.eq(addon._gnotesSessionId, nil, "1 of 4 does not count as fulfilled")
+
+    -- Full-size serve: stamps satisfied.
+    local full = {}
+    for _, m in ipairs(guildFixture) do
+        local key = string.lower(string.match(m[1], "^[^-]+"))
+        full[key] = { s = "frost", nm = m[1], c = m[11], r = m[3] }
+    end
+    addon:OnGuildNotesData("Bosslady", full)
+    H.eq(addon._gnotesSessionId, "epoch-guard", "payload >= map size fulfills the session need")
+
+    -- Officer-declared completeness: a guild leaver keeps our map larger than live truth,
+    -- but a borrow-backed serve stamps anyway (the sender's membership view is fresher).
+    addon._gnotesSessionId = nil
+    addon:OnGuildNotesData("Bosslady", {
+        uzragol = { s = "elemental", nm = "Uzragol", c = "shaman", r = 6 },
+    }, 1)
+    H.eq(addon._gnotesSessionId, "epoch-guard", "declared-complete payload stamps despite n < map")
+
+    addon.session = nil
+    addon.db = nil
 end)
 
 ------------------------------------------------------------------------
