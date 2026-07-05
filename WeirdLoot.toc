@@ -1,6 +1,6 @@
 ## Interface: 30300
 ## Title: WeirdLoot
-## Notes: End-of-raid loot coordination for Wrath 3.3.5a raids
+## Notes: Live loot co-ordination for Weird Vibes raids
 ## Author: Volcker
 ## Version: 1.2.5
 ## IconTexture: Interface\AddOns\WeirdLoot\Textures\weirdloot
