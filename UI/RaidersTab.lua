@@ -79,10 +79,7 @@ end
 local rosterMenuFrame
 
 local function canEditRoster()
-    local me = util:GetPlayerName("player")
-    return addon:IsAuthorizedLootMaster()
-        or addon:IsRaidLeadership(me)
-        or addon:IsGuildLeadership(me)
+    return addon:CanEditRoster()
 end
 
 local function applyPick(entry, specName, status)
@@ -135,7 +132,7 @@ end
 local function refuseRosterEdit(entry)
     if not entry then return true end
     if not canEditRoster() then
-        addon:Print("Roster edit requires being the loot master, raid leader/assistant, or guild leadership.")
+        addon:Print("Roster edit requires guild leadership (officer rank).")
         return true
     end
     return false
@@ -198,7 +195,7 @@ function addon:BuildRaidersTab()
     summary:SetWidth(760)
     summary:SetTextColor(0.9, 0.82, 0.5)
 
-    local editHint = createLabel(panel, "Click a Class / Spec or Status cell to assign it (ML/leadership).", "TOPLEFT", summary, "BOTTOMLEFT", 0, -6)
+    local editHint = createLabel(panel, "Click a Class / Spec or Status cell to assign it (officers).", "TOPLEFT", summary, "BOTTOMLEFT", 0, -6)
     editHint:SetTextColor(0.6, 0.6, 0.6)
     panel.editHint = editHint
 
@@ -279,9 +276,6 @@ function addon:BuildRaidersTab()
         row.specClick:SetWidth(200)
         row.specClick:SetHeight(16)
         row.specClick:SetScript("OnClick", function()
-            if WeirdLootDebugLog and WeirdLootDebugLog.enabled then
-                addon:Print("spec cell click: " .. tostring(row.entryData and row.entryData.name))
-            end
             local ok, err = pcall(addon.OpenRosterSpecMenu, addon, row.entryData)
             if not ok then addon:Print("Spec menu error: " .. tostring(err)) end
         end)
@@ -292,9 +286,6 @@ function addon:BuildRaidersTab()
         row.statusClick:SetWidth(110)
         row.statusClick:SetHeight(16)
         row.statusClick:SetScript("OnClick", function()
-            if WeirdLootDebugLog and WeirdLootDebugLog.enabled then
-                addon:Print("status cell click: " .. tostring(row.entryData and row.entryData.name))
-            end
             local ok, err = pcall(addon.OpenRosterStatusMenu, addon, row.entryData)
             if not ok then addon:Print("Status menu error: " .. tostring(err)) end
         end)
@@ -352,7 +343,10 @@ function addon:RefreshRaidersTab()
             attentionCount = attentionCount + 1
         end
     end
-    self:UpdateRaidersTabAlert(attentionCount)
+    -- The tab-button alarm (badge + pulse) is a call to action, so only people who can act
+    -- get it; the in-list signals below (sort-to-top, row tint, red cells) stay for everyone,
+    -- since knowing WHY someone isn't matching spec prio is useful to any raider.
+    self:UpdateRaidersTabAlert(canEditRoster() and attentionCount or 0)
 
     if self.ui.raidersSummary then
         self.ui.raidersSummary:SetText(string.format(

@@ -14,18 +14,39 @@ local SHINE_TEXTURE = "Interface\\ItemSocketingFrame\\UI-ItemSockets"
 local SHINE_TCOORD  = { 0.3984375, 0.4453125, 0.40234375, 0.44921875 }
 local SHINE_COUNT   = 10
 local SHINE_COLOR   = { 0.95, 0.9, 0.35 }   -- warm gold ("loot")
-local SHINE_REV_PER_SEC = 0.32              -- ring spin speed
+local ATTENTION_COLOR = { 1, 0.25, 0.25 }   -- red ("roster needs fixing")
+local SHINE_REV_PER_SEC = 0.32              -- ring spin speed (owed mode)
+local ATTENTION_PULSE_PER_SEC = 0.9         -- ring breathe speed (attention mode)
 local TWO_PI = math.pi * 2
 
+-- Two modes on the one ring: "owed" spins the sparkles around the button (the loot signal);
+-- "attention" holds them at fixed angles and breathes the whole ring larger/smaller (roster
+-- data needs fixing -- deliberately a different motion so the two states read differently
+-- at a glance even in the same color-blind palette).
 local function shineOnUpdate(shine, elapsed)
-    shine.angle = (shine.angle + elapsed * SHINE_REV_PER_SEC * TWO_PI) % TWO_PI
-    local radius = (shine:GetWidth() or 31) / 2 + 1
     local now = (GetTime and GetTime()) or 0
     local n = #shine.sparkles
+    local baseRadius = (shine:GetWidth() or 31) / 2 + 1
+
+    if shine.mode == "attention" then
+        local breathe = math.sin(now * ATTENTION_PULSE_PER_SEC * TWO_PI)
+        local radius = baseRadius + 2.5 * breathe
+        local sz = 8 + 3 * (0.5 + 0.5 * breathe)
+        for i = 1, n do
+            local a = (i - 1) * (TWO_PI / n)
+            local s = shine.sparkles[i]
+            s:SetPoint("CENTER", shine, "CENTER", math.cos(a) * radius, math.sin(a) * radius)
+            s:SetAlpha(0.6 + 0.4 * (0.5 + 0.5 * breathe))
+            s:SetWidth(sz); s:SetHeight(sz)
+        end
+        return
+    end
+
+    shine.angle = (shine.angle + elapsed * SHINE_REV_PER_SEC * TWO_PI) % TWO_PI
     for i = 1, n do
         local a = shine.angle + (i - 1) * (TWO_PI / n)
         local s = shine.sparkles[i]
-        s:SetPoint("CENTER", shine, "CENTER", math.cos(a) * radius, math.sin(a) * radius)
+        s:SetPoint("CENTER", shine, "CENTER", math.cos(a) * baseRadius, math.sin(a) * baseRadius)
         local tw = 0.5 + 0.5 * math.sin(now * 3 + i)   -- per-sparkle twinkle
         s:SetAlpha(0.35 + 0.65 * tw)
         local sz = 7 + 4 * tw
@@ -80,6 +101,20 @@ function addon:BuildMinimapButton()
     highlight:SetAllPoints(button)
 
     button:SetScript("OnClick", function(selfBtn, mouseButton)
+        -- Attention state: the button is an alarm, so the click is the shortcut to the fix --
+        -- a LEFT-click jumps straight to the Roster tab. Outranks the owed-trade and
+        -- trade-toggle left-clicks while red (those resume once the roster is clean); the
+        -- state only exists for people who can edit (see RefreshMinimapShine), so the jump
+        -- always lands somewhere actionable. Right-click keeps the plain window toggle.
+        local shine = addon.ui.minimapShine
+        if mouseButton == "LeftButton" and shine and shine.mode == "attention" then
+            addon:SelectTab("raiders", true)
+            if not (addon.ui.frame and addon.ui.frame:IsShown()) then
+                addon:ToggleMainFrame()
+            end
+            return
+        end
+
         -- Owed raiders: a LEFT-click drives the whole delivery in two presses and never opens the window
         -- (use a right-click for that). First press opens the trade with the loot master (their side
         -- auto-fills the owed loot); a second press, once the trade window is up, ACCEPTS it. AcceptTrade
@@ -142,6 +177,27 @@ function addon:BuildMinimapButton()
 
         if addon:ShouldWarnMLNotAcceptingTrades() then
             GameTooltip:AddLine("ML is not accepting trades", 1, 0.2, 0.2)
+        end
+
+        -- Roster attention: shown only to people who can fix it, naming exactly what's
+        -- missing per member so the hover answers "why is my button red?" completely.
+        if addon.CanEditRoster and addon:CanEditRoster() then
+            local attention = addon:GetRosterAttentionList()
+            if #attention > 0 then
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddLine("Roster needs attention:", 1, 0.3, 0.3)
+                local shown = math.min(#attention, 8)
+                for i = 1, shown do
+                    local a = attention[i]
+                    local missing = {}
+                    if a.missingSpec then missing[#missing + 1] = "set spec" end
+                    if a.unknownStatus then missing[#missing + 1] = "unknown status" end
+                    GameTooltip:AddLine("  " .. util:TitleCaseWords(a.name or "?") .. " - " .. table.concat(missing, ", "), 1, 0.5, 0.5)
+                end
+                if #attention > shown then
+                    GameTooltip:AddLine(string.format("  ...and %d more", #attention - shown), 1, 0.5, 0.5)
+                end
+            end
         end
 
         local owed = addon:GetLootOwedToMe()
@@ -296,11 +352,41 @@ function addon:GetLootOwedToMe()
     return self.lootCore:OwedItemsFor(util:GetPlayerName("player"))
 end
 
-function addon:SetMinimapOwedGlow(shown)
+-- One refresh for the ring + icon tint. Attention (roster data missing, visible only to
+-- people who can fix it) outranks the owed-loot spin: it's the pre-pull signal, and owed
+-- loot re-surfaces the moment the roster is clean.
+function addon:RefreshMinimapShine()
     local shine = self.ui and self.ui.minimapShine
+    local button = self.ui and self.ui.minimapButton
     if not shine then return end
-    if shown then
-        for _, s in ipairs(shine.sparkles) do s:Show() end
+
+    local attentionCount = 0
+    if self.CanEditRoster and self:CanEditRoster() and self.GetRosterAttentionList then
+        attentionCount = #self:GetRosterAttentionList()
+    end
+
+    local mode
+    if attentionCount > 0 then
+        mode = "attention"
+    elseif (self:CountLootOwedToMe() or 0) > 0 then
+        mode = "owed"
+    end
+    shine.mode = mode
+
+    if button and button.icon then
+        if mode == "attention" then
+            button.icon:SetVertexColor(1, 0.3, 0.3)
+        else
+            button.icon:SetVertexColor(1, 1, 1)
+        end
+    end
+
+    if mode then
+        local color = mode == "attention" and ATTENTION_COLOR or SHINE_COLOR
+        for _, s in ipairs(shine.sparkles) do
+            s:SetVertexColor(color[1], color[2], color[3])
+            s:Show()
+        end
         shine:SetScript("OnUpdate", shineOnUpdate)
     else
         shine:SetScript("OnUpdate", nil)
@@ -309,7 +395,7 @@ function addon:SetMinimapOwedGlow(shown)
 end
 
 function addon:UpdateMinimapOwedGlow()
-    self:SetMinimapOwedGlow((self:CountLootOwedToMe() or 0) > 0)
+    self:RefreshMinimapShine()
 end
 
 function addon:SetMinimapButtonShown(shown)

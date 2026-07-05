@@ -497,7 +497,7 @@ H.test("AutoClearMatchedOverrides: blind clients never clear without note data",
     addon.db = nil
 end)
 
-H.test("OnRosterOverride: same authority gate as guest upsert, clear converges", function()
+H.test("OnRosterOverride: officer gate, officer-sent clear converges", function()
     installGuildApi(true)
     addon.config = fullConfig()
     addon:InitializeRoster()
@@ -508,10 +508,13 @@ H.test("OnRosterOverride: same authority gate as guest upsert, clear converges",
     H.eq(addon:GetRosterOverride("Uzragol"), nil, "Alt-rank sender refused")
 
     addon:OnRosterOverride("Bosslady", { "Uzragol", "restoration", "" })
-    H.eq(addon:GetRosterOverride("Uzragol").specName, "restoration", "leadership sender accepted")
+    H.eq(addon:GetRosterOverride("Uzragol").specName, "restoration", "officer sender accepted")
 
     addon:OnRosterOverride("Onaqui", { "Uzragol", "", "" })
-    H.eq(addon:GetRosterOverride("Uzragol"), nil, "ML-sent clear removes the record")
+    H.eq(addon:GetRosterOverride("Uzragol").specName, "restoration", "ML-sent message ignored")
+
+    addon:OnRosterOverride("Bosslady", { "Uzragol", "", "" })
+    H.eq(addon:GetRosterOverride("Uzragol"), nil, "officer-sent clear removes the record")
 end)
 
 ------------------------------------------------------------------------
@@ -572,7 +575,7 @@ H.test("IsGuildLeadership: rank index at or above the configured cutoff", functi
     addon.config.guildLeadershipMaxRankIndex = nil
 end)
 
-H.test("OnGuestUpsert: accepted from ML or leadership, refused otherwise", function()
+H.test("OnGuestUpsert: accepted from officers only", function()
     installGuildApi(true)
     addon.config = fullConfig()
     addon:InitializeRoster()
@@ -582,24 +585,24 @@ H.test("OnGuestUpsert: accepted from ML or leadership, refused otherwise", funct
     addon:OnGuestUpsert("Achera", { "puggo", "mage", "frost", "main" })
     H.eq(addon.config.roster.puggo, nil, "Alt-rank sender refused")
 
-    addon:OnGuestUpsert("Bosslady", { "puggo", "mage", "frost", "main" })
-    H.eq(addon.config.roster.puggo.specName, "frost", "leadership sender accepted")
-
     addon:OnGuestUpsert("Onaqui", { "puggo", "mage", "fire", "" })
-    H.eq(addon.config.roster.puggo.specName, "fire", "ML sender accepted (not in guild fixture)")
+    H.eq(addon.config.roster.puggo, nil, "ML sender refused: loot authority is not edit authority")
+
+    addon:OnGuestUpsert("Bosslady", { "puggo", "mage", "frost", "main" })
+    H.eq(addon.config.roster.puggo.specName, "frost", "officer sender accepted")
 
     addon:OnGuestUpsert("Bosslady", { "", "mage", "frost", "main" })
     H.eq(#addon.config.rosterEntries, 1, "empty name ignored")
 end)
 
-H.test("IsRaidLeadership / comm gates: raid leader and assistant qualify by raid rank", function()
+H.test("comm gates: officer authority ONLY -- ML and raid leadership are refused", function()
     installGuildApi(true)
     addon.config = fullConfig()
     addon:InitializeRoster()
     addon:RefreshGuildRoster()
-    addon.roster.lootMasterName = nil
+    addon.roster.lootMasterName = "Leadguy"   -- non-officer ML
 
-    -- Simulate a raid: Leadguy leads (rank 2), Helper assists (rank 1), Grunt is a member.
+    -- Simulate a raid: Leadguy is ML AND raid leader; Helper assists. Neither is an officer.
     env.GetNumRaidMembers = function() return 3 end
     env.GetRaidRosterInfo = function(index)
         if index == 1 then return "Leadguy", 2 end
@@ -607,18 +610,12 @@ H.test("IsRaidLeadership / comm gates: raid leader and assistant qualify by raid
         if index == 3 then return "Grunt", 0 end
     end
 
-    H.eq(addon:IsRaidLeadership("Leadguy"), true, "raid leader")
-    H.eq(addon:IsRaidLeadership("HELPER"), true, "assistant, case-insensitive")
-    H.eq(addon:IsRaidLeadership("Grunt"), false, "plain member")
-    H.eq(addon:IsRaidLeadership("Stranger"), false, "not in the raid")
-
-    addon:OnGuestUpsert("Grunt", { "puggo", "mage", "frost", "main" })
-    H.eq(addon.config.roster.puggo, nil, "plain member refused")
     addon:OnGuestUpsert("Leadguy", { "puggo", "mage", "frost", "main" })
-    H.eq(addon.config.roster.puggo.specName, "frost", "raid leader accepted (no ML, no guild rank)")
+    H.eq(addon.config.roster.puggo, nil, "ML + raid leader still refused: not an officer")
     addon:OnRosterOverride("Helper", { "Uzragol", "restoration", "" })
-    H.eq(addon:GetRosterOverride("Uzragol").specName, "restoration", "assistant accepted for overrides")
-    addon:SetRosterOverride("Uzragol", "", "")
+    H.eq(addon:GetRosterOverride("Uzragol"), nil, "assistant refused: not an officer")
+    addon:OnGuestUpsert("Bosslady", { "puggo", "mage", "frost", "main" })
+    H.eq(addon.config.roster.puggo.specName, "frost", "officer accepted")
 
     -- restore the no-group stubs other tests rely on
     env.GetNumRaidMembers = function() return 0 end

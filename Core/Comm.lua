@@ -531,9 +531,7 @@ function addon:SendGuestUpsert(entry)
 end
 
 function addon:OnGuestUpsert(sender, fields)
-    local senderKey = util:NormalizeKey(sender or "")
-    local isLootMaster = senderKey ~= "" and senderKey == util:NormalizeKey(self:GetLootMasterName() or "")
-    if not isLootMaster and not self:IsRaidLeadership(sender) and not self:IsGuildLeadership(sender) then
+    if not self:IsGuildLeadership(sender) then
         return
     end
     local name = fields[1] or ""
@@ -560,9 +558,7 @@ function addon:SendRosterOverride(playerName)
 end
 
 function addon:OnRosterOverride(sender, fields)
-    local senderKey = util:NormalizeKey(sender or "")
-    local isLootMaster = senderKey ~= "" and senderKey == util:NormalizeKey(self:GetLootMasterName() or "")
-    if not isLootMaster and not self:IsRaidLeadership(sender) and not self:IsGuildLeadership(sender) then
+    if not self:IsGuildLeadership(sender) then
         return
     end
     local name = fields[1] or ""

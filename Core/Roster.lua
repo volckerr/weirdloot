@@ -282,38 +282,29 @@ function addon:IsAuthorizedLootMaster()
     return self.roster.isLootMaster
 end
 
--- Raid leadership (leader or assistant; party leader in a 5-man), by NAME. This is the roster
--- EDIT gate's third leg, deliberately separate from loot authority: loot authority is
--- master-loot-only (a leader has nothing to distribute under group loot; see the test-mode-only
--- fallback in RefreshLootAuthority), but fixing roster data must not wait for master loot to be
--- switched on. Verifiable by every group member, so comm receivers can gate on the sender too.
-function addon:IsRaidLeadership(playerName)
-    local key = util:NormalizeKey(playerName or "")
-    if key == "" then
-        return false
-    end
-    local numRaid = (GetNumRaidMembers and GetNumRaidMembers()) or 0
-    if numRaid > 0 then
-        for index = 1, numRaid do
-            local name, rank = GetRaidRosterInfo(index)
-            if name and util:NormalizeKey(util:StripRealm(name)) == key then
-                return rank == 2 or rank == 1
-            end
-        end
-        return false
-    end
-    local numParty = (GetNumPartyMembers and GetNumPartyMembers()) or 0
-    if numParty > 0 then
-        if util:NormalizeKey(util:GetPlayerName("player") or "") == key then
-            return (IsPartyLeader and IsPartyLeader()) and true or false
-        end
-        local leaderIndex = (GetPartyLeaderIndex and GetPartyLeaderIndex()) or 0
-        if leaderIndex > 0 then
-            local leaderName = UnitName and UnitName("party" .. leaderIndex) or nil
-            return (leaderName and util:NormalizeKey(util:StripRealm(leaderName)) == key) and true or false
+-- Roster-edit authority: guild leadership (officer ranks) ONLY. Deliberately narrower than
+-- loot authority -- the ML is often not an officer and asks one to fix roster data; raid
+-- leadership confers nothing here. The single source for every edit surface (Raiders tab
+-- menus, minimap attention alert) and mirrored by the comm receive gates.
+function addon:CanEditRoster()
+    return self:IsGuildLeadership(util:GetPlayerName("player"))
+end
+
+-- The raid members whose roster data still needs leadership attention, with WHAT is missing
+-- broken out (feeds the minimap tooltip and any future nag surface).
+function addon:GetRosterAttentionList()
+    local list = {}
+    for _, entry in ipairs(self:GetRosterDisplayList()) do
+        if entry.needsAttention then
+            list[#list + 1] = {
+                name = entry.name,
+                className = entry.className,
+                missingSpec = (entry.specName or "") == "",
+                unknownStatus = entry.status == "unknown",
+            }
         end
     end
-    return false
+    return list
 end
 
 function addon:GetLootMasterName()
