@@ -202,18 +202,20 @@ end)
 ------------------------------------------------------------------------
 -- util:StatusRank / util:PlayerDisplayStatus
 ------------------------------------------------------------------------
-H.test("util:StatusRank: main=3, designatedalt=2, else=1", function()
+H.test("util:StatusRank: main/unknown=3, designatedalt=2, alt tier=1", function()
     H.eq(util:StatusRank("main"), 3, "main")
+    H.eq(util:StatusRank("unknown"), 3, "unknown competes as main (missing note must not cost loot)")
     H.eq(util:StatusRank("designatedalt"), 2, "designatedalt")
     H.eq(util:StatusRank("DESIGNATEDALT"), 2, "case-insensitive")
-    H.eq(util:StatusRank("nil"), 1, "nil/none is lowest")
+    H.eq(util:StatusRank("nil"), 1, "the deliberate bottom tier (Alt) is lowest")
     H.eq(util:StatusRank(""), 1, "empty is lowest")
     H.eq(util:StatusRank(nil), 1, "nil is lowest")
 end)
 H.test("util:PlayerDisplayStatus: maps status to display", function()
     H.eq(util:PlayerDisplayStatus("main"), "Main", "main -> Main")
     H.eq(util:PlayerDisplayStatus("designatedalt"), "Designated Alt", "designatedalt")
-    H.eq(util:PlayerDisplayStatus("nil"), "Unknown", "nil -> Unknown")
+    H.eq(util:PlayerDisplayStatus("nil"), "Alt", "bottom tier -> Alt (a known placement)")
+    H.eq(util:PlayerDisplayStatus("unknown"), "Unknown", "unknown -> Unknown (needs leadership attention)")
     H.eq(util:PlayerDisplayStatus(""), "Unknown", "empty -> Unknown")
 end)
 

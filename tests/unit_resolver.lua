@@ -45,6 +45,30 @@ H.test("FilterByStatus: non-BiS mode merges Main + DesAlt into one effective ran
     H.check(not kept.Carol, "Carol dropped (nil status)")
 end)
 
+H.test("FilterByStatus: unknown IS a main at resolution time", function()
+    local w = H.makeWorld("Masterlooter", true)
+    local cands = {
+        { name = "Alice",  status = "main" },
+        { name = "Mystery", status = "unknown" },   -- unmapped rank / off-roster guest
+        { name = "Bob",    status = "designatedalt" },
+        { name = "Carol",  status = "nil" },
+    }
+    local out, highest = w.addon:FilterByStatus(cands, false)
+    local kept = {}
+    for _, c in ipairs(out) do kept[c.name] = true end
+    H.eq(#out, 2, "BiS mode keeps mains AND unknowns")
+    H.truthy(kept.Alice, "main kept")
+    H.truthy(kept.Mystery, "unknown competes as a main, not below")
+    H.eq(highest, 3, "tier reported as Main")
+
+    out = w.addon:FilterByStatus(cands, true)
+    kept = {}
+    for _, c in ipairs(out) do kept[c.name] = true end
+    H.eq(#out, 3, "non-BiS merge keeps main+unknown+dalt")
+    H.truthy(kept.Mystery, "unknown merged exactly like a main")
+    H.check(not kept.Carol, "Alt tier still drops")
+end)
+
 H.test("FilterByStatus: empty input returns empty", function()
     local w = H.makeWorld("Masterlooter", true)
     local out, highest = w.addon:FilterByStatus({}, false)

@@ -218,26 +218,27 @@ function addon:RefreshRaidersTab()
     end
 
     local rosterEntries = self:GetSortedRosterEntries()
-    local configuredCount = #self:GetRosterEntries()
-    local attendeeCount = #self:GetAttendees()
-    local matchedCount = 0
-    local unconfiguredCount = 0
 
-    for _, entry in ipairs(rosterEntries) do
-        if entry.present and entry.source == "configured" then
-            matchedCount = matchedCount + 1
-        elseif entry.present and entry.source == "unconfigured" then
-            unconfiguredCount = unconfiguredCount + 1
+    -- Counts come from the FULL display list, not the (possibly raid-only filtered) view.
+    local guildCount, guestLayerCount, guestCount = 0, 0, 0
+    for _, entry in ipairs(self:GetRosterDisplayList()) do
+        if entry.source == "guild" then
+            guildCount = guildCount + 1
+        elseif entry.source == "configured" then
+            guestLayerCount = guestLayerCount + 1
+        end
+        if entry.isGuest then
+            guestCount = guestCount + 1
         end
     end
 
     if self.ui.raidersSummary then
         self.ui.raidersSummary:SetText(string.format(
-            "Master roster: %d | In current raid: %d | Matched: %d | Unconfigured in raid: %d",
-            configuredCount,
-            attendeeCount,
-            matchedCount,
-            unconfiguredCount
+            "Guild: %d | Guest layer: %d | In current raid: %d | Unhandled guests: %d",
+            guildCount,
+            guestLayerCount,
+            #self:GetAttendees(),
+            guestCount
         ))
     end
 
@@ -256,6 +257,9 @@ function addon:RefreshRaidersTab()
         if entry.isGuest then
             row.source:SetText("Guest")
             row.source:SetTextColor(1, 0.82, 0.2)
+        elseif entry.source == "guild" then
+            row.source:SetText("Guild")
+            row.source:SetTextColor(0.6, 0.9, 0.6)
         else
             row.source:SetText(entry.source == "configured" and "Roster" or "Live")
             row.source:SetTextColor(entry.source == "configured" and 0.85 or 1, entry.source == "configured" and 0.85 or 0.45, entry.source == "configured" and 0.85 or 0.45)

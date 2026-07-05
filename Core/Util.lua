@@ -184,6 +184,10 @@ function util:PlayerDisplayStatus(status)
         return "Main"
     elseif normalized == "designatedalt" then
         return "Designated Alt"
+    elseif normalized == "nil" then
+        -- The bottom tier is a KNOWN placement (Alt rank or an explicit ,alt note), distinct
+        -- from "unknown" = a rank the mapping doesn't cover with no note, or an off-roster guest.
+        return "Alt"
     end
 
     return "Unknown"
@@ -202,7 +206,10 @@ end
 
 function util:StatusRank(status)
     local normalized = self:NormalizeKey(status)
-    if normalized == "main" then
+    -- "unknown" (unmapped rank with no note, or an off-roster guest) competes as a main:
+    -- nobody should lose loot to a missing officer note. It still DISPLAYS as Unknown so
+    -- leadership can spot who needs role/spec info assigned.
+    if normalized == "main" or normalized == "unknown" then
         return 3
     elseif normalized == "designatedalt" then
         return 2

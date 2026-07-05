@@ -114,20 +114,26 @@ function addon:StatusTokenFor(statusValue)
     return nil
 end
 
--- Rank index -> status. 0-based as the API reports it (0 = guild master). The two special
+-- Rank index -> status. 0-based as the API reports it (0 = guild master). The special
 -- indices come from config so a ladder reshuffle is a settings edit, not a code change.
--- Defaults match the guild's live ladder: 5 = Designated Alt, 6 = Raider (main), 7 = Alt,
--- 9 = Trial (no tier of its own; lands on main like every unmapped rank).
+-- Defaults match the guild's live ladder: 2 = officer alts (Alt tier), 5 = Designated Alt,
+-- 6 = Raider (main), 7 = Alt. Every other rank (GM, officers, loot council, Trial, ...) is
+-- "unknown" unless the officer note carries an explicit status token; a note override always
+-- wins over the rank.
 function addon:GuildRankStatus(rankIndex)
     local cfg = self.config or {}
     local altIndex = tonumber(cfg.guildAltRankIndex) or 7
+    local officerAltIndex = tonumber(cfg.guildOfficerAltRankIndex) or 2
     local daltIndex = tonumber(cfg.guildDesignatedAltRankIndex) or 5
-    if rankIndex == altIndex then
+    local mainIndex = tonumber(cfg.guildMainRankIndex) or 6
+    if rankIndex == altIndex or rankIndex == officerAltIndex then
         return "nil"
     elseif rankIndex == daltIndex then
         return "designatedalt"
+    elseif rankIndex == mainIndex then
+        return "main"
     end
-    return "main"
+    return "unknown"
 end
 
 -- Scan the guild roster into name -> { name, className, specName, status, rankName, rankIndex,

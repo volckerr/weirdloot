@@ -211,6 +211,7 @@ function addon:PLAYER_LOGIN()
             lootSortDir = "asc",           -- header cycle: asc -> desc -> recent (off)
             lootSortRecentApplied = true,  -- fresh installs already start on the recent default; see migration
             rosterSortMode = "name",
+            rosterRaidOnly = true,         -- Raiders tab defaults to the raid view; the full guild is a toggle away
             resultsSortMode = "default",   -- "default" = resolution time, newest first; "name" or "winner" via header click
             resultsSortDir = "asc",        -- header cycle: asc -> desc -> default (off)
 

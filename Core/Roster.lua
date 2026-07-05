@@ -23,7 +23,9 @@ function addon:RefreshRoster()
             local profile = self:GetRosterProfile(name) or {}
             local className = profile.className or self:NormalizeClassName(classFileName or classLocalized or "")
             local specName = profile.specName or ""
-            local status = profile.status or "nil"
+            -- No profile anywhere (not guild, not guest layer) = an unhandled guest: status is
+            -- genuinely unknown, distinct from the deliberate bottom tier ("nil" = Alt).
+            local status = profile.status or "unknown"
 
             local attendee = {
                 index = index,
@@ -51,19 +53,40 @@ function addon:BuildRosterDisplay(attendeesByName)
     local display = {}
     local seen = {}
 
-    for _, entry in ipairs(self:GetRosterEntries()) do
-        local key = util:NormalizeKey(entry.name)
-        local attendee = attendeesByName[key]
+    -- The guild IS the roster: every guild member gets a row, showing the same merged profile
+    -- resolution uses (rank/note-derived status and spec, configured spec filling a blank
+    -- note), so what the tab shows is what the resolver would do.
+    local guildMembers = (self.guildRoster and self.guildRoster.members) or {}
+    for key, member in pairs(guildMembers) do
+        local profile = self:GetRosterProfile(member.name) or member
         display[#display + 1] = {
-            name = entry.name,
-            className = entry.className,
-            specName = entry.specName,
-            status = entry.status,
-            present = attendee ~= nil,
-            descriptor = entry.descriptor,
-            source = "configured",
+            name = member.name,
+            className = profile.className,
+            specName = profile.specName,
+            status = profile.status,
+            present = attendeesByName[key] ~= nil,
+            descriptor = util:NormalizeKey((profile.className or "") .. " " .. (profile.specName or "")),
+            source = "guild",
         }
         seen[key] = true
+    end
+
+    -- Configured entries that aren't guildies: the guest/override layer.
+    for _, entry in ipairs(self:GetRosterEntries()) do
+        local key = util:NormalizeKey(entry.name)
+        if not seen[key] then
+            local attendee = attendeesByName[key]
+            display[#display + 1] = {
+                name = entry.name,
+                className = entry.className,
+                specName = entry.specName,
+                status = entry.status,
+                present = attendee ~= nil,
+                descriptor = entry.descriptor,
+                source = "configured",
+            }
+            seen[key] = true
+        end
     end
 
     for key, attendee in pairs(attendeesByName or {}) do

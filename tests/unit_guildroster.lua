@@ -207,21 +207,26 @@ end)
 ------------------------------------------------------------------------
 -- GuildRankStatus (0-based rank index; Alt and DAlt indices from config)
 ------------------------------------------------------------------------
-H.test("GuildRankStatus: default indices (Alt=7, DAlt=5, live ladder)", function()
+H.test("GuildRankStatus: default indices (Alt=7, Main=6, DAlt=5, OfficerAlt=2)", function()
     addon.config = {}
-    H.eq(addon:GuildRankStatus(0), "main", "guild master -> main")
     H.eq(addon:GuildRankStatus(7), "nil", "Alt rank -> bottom tier")
-    H.eq(addon:GuildRankStatus(5), "designatedalt", "DAlt rank")
+    H.eq(addon:GuildRankStatus(2), "nil", "officer alts -> bottom tier (note overrides if not)")
     H.eq(addon:GuildRankStatus(6), "main", "Raider -> main")
-    H.eq(addon:GuildRankStatus(9), "main", "Trial has no tier of its own -> main")
-    H.eq(addon:GuildRankStatus(nil), "main", "no rank index -> main")
+    H.eq(addon:GuildRankStatus(5), "designatedalt", "DAlt rank")
+    H.eq(addon:GuildRankStatus(0), "unknown", "guild master: no note -> unknown")
+    H.eq(addon:GuildRankStatus(9), "unknown", "Trial -> unknown")
+    H.eq(addon:GuildRankStatus(nil), "unknown", "no rank index -> unknown")
 end)
 
 H.test("GuildRankStatus: indices come from config", function()
-    addon.config = { guildAltRankIndex = 6, guildDesignatedAltRankIndex = 1 }
+    -- A ladder reshuffle sets all four indices; alt checks run first, so a main index that
+    -- collides with a leftover alt default would read as alt (hence: configure the set).
+    addon.config = { guildAltRankIndex = 6, guildOfficerAltRankIndex = 4, guildDesignatedAltRankIndex = 1, guildMainRankIndex = 2 }
     H.eq(addon:GuildRankStatus(6), "nil", "configured Alt index")
+    H.eq(addon:GuildRankStatus(4), "nil", "configured officer-alt index")
     H.eq(addon:GuildRankStatus(1), "designatedalt", "configured DAlt index")
-    H.eq(addon:GuildRankStatus(7), "main", "built-in default replaced by config, not merged")
+    H.eq(addon:GuildRankStatus(2), "main", "configured Main index")
+    H.eq(addon:GuildRankStatus(7), "unknown", "built-in default replaced by config, not merged")
     addon.config = {}
 end)
 
@@ -294,7 +299,7 @@ H.test("RefreshGuildRoster: full scan with readable notes", function()
 
     local newguy = addon:GetGuildMemberProfile("NEWGUY")
     H.eq(newguy.specName, "", "note without a token -> no spec")
-    H.eq(newguy.status, "main", "Trial rank -> main (no tier of its own)")
+    H.eq(newguy.status, "unknown", "Trial rank, no note -> unknown (resolves as main, flagged for leadership)")
 
     local bosslady = addon:GetGuildMemberProfile("Bosslady")
     H.eq(bosslady.status, "designatedalt", "note dalt overrides GM rank status")
@@ -307,7 +312,7 @@ H.test("RefreshGuildRoster: unreadable notes leave specs and overrides blank", f
     H.eq(addon.guildRoster.canViewNotes, false, "flagged for relay")
     H.eq(addon:GetGuildMemberProfile("Uzragol").specName, "", "spec not trusted from blank read")
     H.eq(addon:GetGuildMemberProfile("Achera").status, "nil", "rank mapping still applies (rank is public)")
-    H.eq(addon:GetGuildMemberProfile("Bosslady").status, "main", "dalt override unavailable without notes")
+    H.eq(addon:GetGuildMemberProfile("Bosslady").status, "unknown", "dalt override unavailable without notes; GM rank alone is unknown")
 end)
 
 ------------------------------------------------------------------------
@@ -333,7 +338,7 @@ H.test("GetRosterProfile: configured spec fills a blank note, guild status kept"
     }
     local profile = addon:GetRosterProfile("Newguy")
     H.eq(profile.specName, "fire", "spec filled from configured entry")
-    H.eq(profile.status, "main", "status still rank-derived, not configured")
+    H.eq(profile.status, "unknown", "status still rank-derived (Trial=unknown), not configured")
     H.eq(profile.className, "mage", "class from guild")
 end)
 
@@ -364,6 +369,43 @@ H.test("GetGuildMemberProfile: nil-safe", function()
     H.eq(addon:GetGuildMemberProfile(nil), nil, "nil name")
     addon.guildRoster = nil
     H.eq(addon:GetGuildMemberProfile("Uzragol"), nil, "no roster data")
+end)
+
+------------------------------------------------------------------------
+-- BuildRosterDisplay: guild members are rows, configured layer covers
+-- guests only, rows show the merged (resolution) profile
+------------------------------------------------------------------------
+H.test("BuildRosterDisplay: guild-first with guest layer and live pugs", function()
+    installGuildApi(true)
+    addon.config = {
+        rosterEntries = {
+            { name = "puggo", className = "rogue", specName = "combat", status = "main" },
+            { name = "newguy", className = "mage", specName = "fire", status = "designatedalt" },
+        },
+        roster = {},
+        rosterImportText = "", lootPriorityText = "", namedItemsText = "",
+        lootRules = {}, namedRules = {}, revision = 0,
+    }
+    addon.config.roster = addon:BuildRosterMap(addon.config.rosterEntries)
+    addon:RefreshGuildRoster()
+
+    local pug = { name = "Randomer", className = "warrior", specName = "", status = "nil", descriptor = "warrior" }
+    local display = addon:BuildRosterDisplay({ randomer = pug })
+
+    local byName = {}
+    for _, entry in ipairs(display) do byName[entry.name] = entry end
+
+    H.eq(#display, 6, "4 guild + 1 guest + 1 live pug")
+    H.eq(byName.Uzragol.source, "guild", "guild member sourced from guild")
+    H.eq(byName.Uzragol.specName, "elemental", "note spec shown")
+    H.eq(byName.Achera.status, "nil", "rank-derived status shown")
+    H.eq(byName.Newguy.source, "guild", "configured guildie not duplicated into guest layer")
+    H.eq(byName.Newguy.specName, "fire", "row shows the merged profile (configured spec fills blank note)")
+    H.eq(byName.Newguy.status, "unknown", "rank status (Trial=unknown) wins over configured status")
+    H.eq(byName.puggo.source, "configured", "non-guildie configured entry = guest layer")
+    H.eq(byName.Randomer.source, "unconfigured", "live pug row kept")
+    H.eq(byName.Randomer.isGuest, true, "present tokenless non-guildie flagged guest")
+    H.eq(byName.puggo.isGuest, false, "absent guest-layer entry not flagged")
 end)
 
 ------------------------------------------------------------------------
