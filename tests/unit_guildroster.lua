@@ -385,6 +385,7 @@ H.test("BuildRosterDisplay: guild-first with guest layer and live pugs", functio
         roster = {},
         rosterImportText = "", lootPriorityText = "", namedItemsText = "",
         lootRules = {}, namedRules = {}, revision = 0,
+        rosterGuestPurgeV1Applied = true,   -- keep the guildie entry: this test exercises the spec-fill merge, not the purge
     }
     addon.config.roster = addon:BuildRosterMap(addon.config.rosterEntries)
     addon:RefreshGuildRoster()
@@ -406,6 +407,153 @@ H.test("BuildRosterDisplay: guild-first with guest layer and live pugs", functio
     H.eq(byName.Randomer.source, "unconfigured", "live pug row kept")
     H.eq(byName.Randomer.isGuest, true, "present tokenless non-guildie flagged guest")
     H.eq(byName.puggo.isGuest, false, "absent guest-layer entry not flagged")
+end)
+
+local function fullConfig()
+    return {
+        rosterEntries = {},
+        roster = {},
+        rosterImportText = "",
+        lootPriorityText = "",
+        namedItemsText = "",
+        lootRules = {},
+        namedRules = {},
+        revision = 0,
+    }
+end
+
+------------------------------------------------------------------------
+-- Roster overrides: the click-a-cell layer beats note/rank per-field,
+-- persists in config, clears back to durable sources, comm-gated
+------------------------------------------------------------------------
+H.test("SetRosterOverride/GetRosterProfile: override beats note and rank per-field", function()
+    installGuildApi(true)
+    addon.config = fullConfig()
+    addon:InitializeRoster()
+    addon:RefreshGuildRoster()
+
+    addon:SetRosterOverride("Uzragol", "restoration", "")
+    local profile = addon:GetRosterProfile("Uzragol")
+    H.eq(profile.specName, "restoration", "spec override beats the note's elemental")
+    H.eq(profile.status, "main", "status untouched: rank still decides")
+    H.eq(profile.overriddenSpec, true, "spec flagged as overridden")
+    H.eq(profile.overriddenStatus, nil, "status not flagged")
+
+    addon:SetRosterOverride("Uzragol", "restoration", "designatedalt")
+    profile = addon:GetRosterProfile("Uzragol")
+    H.eq(profile.status, "designatedalt", "status override beats rank")
+
+    addon:SetRosterOverride("Bosslady", "", "main")
+    profile = addon:GetRosterProfile("Bosslady")
+    H.eq(profile.status, "main", "override beats the note's dalt token")
+    H.eq(profile.specName, "blood", "note spec kept when only status is overridden")
+
+    addon:SetRosterOverride("Uzragol", "", "")
+    profile = addon:GetRosterProfile("Uzragol")
+    H.eq(profile.specName, "elemental", "clearing restores the note spec")
+    H.eq(profile.status, "main", "clearing restores the rank status")
+    H.eq(addon:GetRosterOverride("Uzragol"), nil, "empty override record removed")
+end)
+
+H.test("AutoClearMatchedOverrides: per-field clear when durable sources catch up", function()
+    installGuildApi(true)
+    addon.config = fullConfig()
+    addon:InitializeRoster()
+    addon:RefreshGuildRoster()
+
+    -- spec matches the note (elemental), status does not (Raider rank -> main)
+    addon:SetRosterOverride("Uzragol", "elemental", "designatedalt")
+    addon:RefreshGuildRoster()
+    local override = addon:GetRosterOverride("Uzragol")
+    H.eq(override.specName, nil, "matching spec field cleared")
+    H.eq(override.status, "designatedalt", "non-matching status field kept")
+
+    addon:SetRosterOverride("Uzragol", "", "main")   -- now matches the rank derivation
+    addon:RefreshGuildRoster()
+    H.eq(addon:GetRosterOverride("Uzragol"), nil, "fully matching record removed")
+end)
+
+H.test("AutoClearMatchedOverrides: blind clients never clear without note data", function()
+    installGuildApi(false)
+    addon.config = fullConfig()
+    addon.db = nil                                   -- no relay cache either
+    addon:InitializeRoster()
+    addon:RefreshGuildRoster()
+
+    -- Achera: note says fro (invisible to us), Alt rank -> durable status "nil" locally.
+    -- Both fields would "match" a blind derivation; neither may clear on rank evidence alone.
+    addon:SetRosterOverride("Achera", "frost", "nil")
+    addon:RefreshGuildRoster()
+    local override = addon:GetRosterOverride("Achera")
+    H.eq(override.specName, "frost", "spec kept: no note data")
+    H.eq(override.status, "nil", "status kept: rank match alone is not evidence")
+
+    -- A relay-cache hit counts as note data: now both fields clear.
+    addon.db = { guildNotesCache = { at = 0, from = "Officer", notes = { achera = { s = "frost" } } } }
+    addon:RefreshGuildRoster()
+    H.eq(addon:GetRosterOverride("Achera"), nil, "cache-backed derivation clears the record")
+    addon.db = nil
+end)
+
+H.test("OnRosterOverride: same authority gate as guest upsert, clear converges", function()
+    installGuildApi(true)
+    addon.config = fullConfig()
+    addon:InitializeRoster()
+    addon:RefreshGuildRoster()
+    addon.roster.lootMasterName = "Onaqui"
+
+    addon:OnRosterOverride("Achera", { "Uzragol", "restoration", "" })
+    H.eq(addon:GetRosterOverride("Uzragol"), nil, "Alt-rank sender refused")
+
+    addon:OnRosterOverride("Bosslady", { "Uzragol", "restoration", "" })
+    H.eq(addon:GetRosterOverride("Uzragol").specName, "restoration", "leadership sender accepted")
+
+    addon:OnRosterOverride("Onaqui", { "Uzragol", "", "" })
+    H.eq(addon:GetRosterOverride("Uzragol"), nil, "ML-sent clear removes the record")
+end)
+
+------------------------------------------------------------------------
+-- Legacy guest-layer purge: one-time, full-scan-only, guildies dropped,
+-- true guests kept, stamp prevents re-runs
+------------------------------------------------------------------------
+H.test("PurgeGuildCoveredGuestEntries: guildies dropped once, guests kept", function()
+    installGuildApi(true)
+    addon.config = fullConfig()
+    addon.config.rosterEntries = {
+        { name = "uzragol", className = "shaman", specName = "restoration", status = "main" },
+        { name = "puggo", className = "rogue", specName = "combat", status = "main" },
+    }
+    addon:InitializeRoster()
+    addon:RequestGuildRoster()   -- purge only trusts borrow-cycle (provably full) scans
+    addon:RefreshGuildRoster()
+    H.eq(#addon.config.rosterEntries, 1, "guild-covered entry dropped")
+    H.eq(addon.config.rosterEntries[1].name, "puggo", "true guest kept")
+    H.eq(addon.config.rosterGuestPurgeV1Applied, true, "stamp set")
+
+    addon:UpsertRosterEntry({ name = "uzragol", className = "shaman", specName = "restoration", status = "main" })
+    addon:RequestGuildRoster()
+    addon:RefreshGuildRoster()
+    H.eq(#addon.config.rosterEntries, 2, "stamped: entries added later are never re-purged")
+end)
+
+H.test("PurgeGuildCoveredGuestEntries: never against a partial (online-only) scan", function()
+    installGuildApi(true)
+    showOffline = false          -- player's view hides offline; Achera is invisible
+    addon.guildRoster = nil
+    addon.config = fullConfig()
+    addon.config.rosterEntries = {
+        { name = "achera", className = "death knight", specName = "frost", status = "main" },
+    }
+    addon:InitializeRoster()
+    addon:RefreshGuildRoster()   -- spontaneous update, not ours: never a purge trigger
+    H.eq(#addon.config.rosterEntries, 1, "offline guildie's entry survives the partial scan")
+    H.eq(addon.config.rosterGuestPurgeV1Applied, nil, "stamp not set: purge still pending")
+
+    addon:RequestGuildRoster()   -- borrow cycle: filter forced on, scan provably full
+    addon:RefreshGuildRoster()
+    H.eq(#addon.config.rosterEntries, 0, "purged on the borrow-cycle scan")
+    H.eq(addon.config.rosterGuestPurgeV1Applied, true, "stamp set")
+    H.eq(showOffline, false, "player's filter restored after the borrow")
 end)
 
 ------------------------------------------------------------------------
@@ -442,19 +590,6 @@ end)
 ------------------------------------------------------------------------
 -- Guest upsert: local write, leadership gate, comm handler
 ------------------------------------------------------------------------
-local function fullConfig()
-    return {
-        rosterEntries = {},
-        roster = {},
-        rosterImportText = "",
-        lootPriorityText = "",
-        namedItemsText = "",
-        lootRules = {},
-        namedRules = {},
-        revision = 0,
-    }
-end
-
 H.test("UpsertRosterEntry: appends, then replaces by name", function()
     addon.config = fullConfig()
     addon:InitializeRoster()

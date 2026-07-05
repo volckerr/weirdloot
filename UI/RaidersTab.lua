@@ -18,7 +18,10 @@ function addon:GetSortedRosterEntries()
     local entries = util:CloneTable(self:GetRosterDisplayList() or {})
     local sortMode = self.db.ui.rosterSortMode or "name"
 
-    if self.db.ui.rosterRaidOnly then
+    -- The raid filter only means something inside a raid; outside one the tab shows the
+    -- guild roster regardless, and the user's saved preference just waits (checkbox renders
+    -- disabled but keeps its state).
+    if self.db.ui.rosterRaidOnly and #self:GetAttendees() > 0 then
         local present = {}
         for _, entry in ipairs(entries) do
             if entry.present then
@@ -46,8 +49,14 @@ function addon:GetSortedRosterEntries()
             end
             return util:NormalizeKey(left.name or "") < util:NormalizeKey(right.name or "")
         elseif sortMode == "status" then
-            local leftRank = util:StatusRank(left.status)
-            local rightRank = util:StatusRank(right.status)
+            -- Display order only: Unknowns lead (they need leadership attention), then Main,
+            -- DAlt, Alt. Resolution still treats unknown as main (util:StatusRank).
+            local function displayRank(status)
+                if util:NormalizeKey(status) == "unknown" then return 4 end
+                return util:StatusRank(status)
+            end
+            local leftRank = displayRank(left.status)
+            local rightRank = displayRank(right.status)
             if leftRank ~= rightRank then
                 return leftRank > rightRank
             end
@@ -60,34 +69,119 @@ function addon:GetSortedRosterEntries()
     return entries
 end
 
--- Parse the add-guest line ("Name, class spec[, status]"; status defaults to main: a guest
--- competes as a main) and upsert + broadcast it. Authority: the ML or guild leadership;
--- receivers re-verify in OnGuestUpsert, so a local-only edit by anyone else is refused here
--- rather than silently diverging.
-function addon:AddGuestFromInput(line)
-    line = string.trim(line or "")
-    if line == "" then
-        return false
+-- ---- on-the-fly overrides: click a row's Class/Spec or Status cell, pick from a dropdown ----
+-- Authority: ML or guild leadership (receivers re-verify in the comm handlers). Guildies get
+-- a persistent override record on top of rank/note (SetRosterOverride, "stored for next
+-- time"); non-guildies write their guest-layer entry directly, so a pug's pick is remembered
+-- for their next visit too. Both broadcast from whoever clicked.
+
+local rosterMenuFrame
+
+local function canEditRoster()
+    return addon:IsAuthorizedLootMaster() or addon:IsGuildLeadership(util:GetPlayerName("player"))
+end
+
+local function applyPick(entry, specName, status)
+    if addon:GetGuildMemberProfile(entry.name) then
+        local override = addon:GetRosterOverride(entry.name) or {}
+        addon:SetRosterOverride(entry.name,
+            specName ~= nil and specName or (override.specName or ""),
+            status ~= nil and status or (override.status or ""))
+        addon:SendRosterOverride(entry.name)
+    else
+        local updated = {
+            name = entry.name,
+            className = entry.className,
+            specName = specName ~= nil and specName or (entry.specName or ""),
+            status = status ~= nil and status or (entry.status or "main"),
+        }
+        if updated.status == "unknown" then updated.status = "main" end   -- picking a spec registers a guest; guests compete as mains
+        addon:UpsertRosterEntry(updated)
+        addon:SendGuestUpsert(updated)
     end
-    if not (self:IsAuthorizedLootMaster() or self:IsGuildLeadership(util:GetPlayerName("player"))) then
-        self:Print("Only the loot master or guild leadership can add roster entries.")
-        return false
+end
+
+-- The menu's name line: a REAL title (disabled, no hover), class-colored via text escape.
+local function rosterMenuNameEntry(entry)
+    return {
+        text = (util:GetClassColorCode(entry.className) or "|cffffffff") .. util:TitleCaseWords(entry.name or "") .. "|r",
+        isTitle = true,
+        notCheckable = true,
+    }
+end
+
+local function showRosterMenu(menu)
+    if not EasyMenu then
+        addon:Print("EasyMenu is missing from FrameXML; cannot show the roster picker.")
+        return
     end
-    local parsed = self:ParseRosterImport(line)[1]
-    if not parsed or not parsed.className then
-        self:Print("Add guest: use Name, class spec (e.g. Puggo, mage frost). Status is optional and defaults to main.")
-        return false
+    rosterMenuFrame = rosterMenuFrame or CreateFrame("Frame", "WeirdLootRosterMenu", UIParent, "UIDropDownMenuTemplate")
+    EasyMenu(menu, rosterMenuFrame, "cursor", 0, 0, "MENU", 2)
+    -- Titles are hard-forced onto GameFontNormalSmallLeft at build time; bump just OUR title
+    -- (always item 1) after the list renders. Titles draw with the disabled font, and the next
+    -- menu to reuse this button re-forces its own font, so nothing leaks.
+    local titleButton = _G["DropDownList1Button1"]
+    if titleButton and GameFontNormalLeft then
+        titleButton:SetDisabledFontObject(GameFontNormalLeft)
     end
-    local parts = util:Split(line, ",")
-    if string.trim(parts[3] or "") == "" then
-        parsed.status = "main"
+end
+
+-- Every refusal is loud: with scriptErrors off, a silent return here is indistinguishable
+-- from a dead click target, which makes "nothing pops up" undiagnosable from the outside.
+local function refuseRosterEdit(entry)
+    if not entry then return true end
+    if not canEditRoster() then
+        addon:Print("Roster edit requires being the loot master or guild leadership.")
+        return true
     end
-    self:UpsertRosterEntry(parsed)
-    self:SendGuestUpsert(parsed)
-    self:Print(string.format("Roster: added %s (%s, %s).",
-        util:TitleCaseWords(parsed.name), string.trim((parsed.className or "") .. " " .. (parsed.specName or "")),
-        util:PlayerDisplayStatus(parsed.status)))
-    return true
+    return false
+end
+
+function addon:OpenRosterSpecMenu(entry)
+    if refuseRosterEdit(entry) then return end
+    local specs = self.specTokens[util:NormalizeKey(entry.className or "")]
+    if not specs then
+        self:Print(string.format("No class known for %s; cannot pick a spec.", util:TitleCaseWords(entry.name or "?")))
+        return
+    end
+    local ordered = {}
+    for _, specName in pairs(specs) do ordered[#ordered + 1] = specName end
+    table.sort(ordered)
+
+    local menu = { rosterMenuNameEntry(entry) }
+    for _, specName in ipairs(ordered) do
+        menu[#menu + 1] = {
+            text = util:TitleCaseWords(specName),
+            checked = entry.specName == specName,
+            func = function() applyPick(entry, specName, nil) end,
+        }
+    end
+    if entry.overriddenSpec then
+        menu[#menu + 1] = {
+            text = "Clear override (use note/rank)",
+            notCheckable = true,
+            func = function() applyPick(entry, "", nil) end,
+        }
+    end
+    showRosterMenu(menu)
+end
+
+function addon:OpenRosterStatusMenu(entry)
+    if refuseRosterEdit(entry) then return end
+    local menu = {
+        rosterMenuNameEntry(entry),
+        { text = "Main", checked = entry.status == "main", func = function() applyPick(entry, nil, "main") end },
+        { text = "Designated Alt", checked = entry.status == "designatedalt", func = function() applyPick(entry, nil, "designatedalt") end },
+        { text = "Alt", checked = entry.status == "nil", func = function() applyPick(entry, nil, "nil") end },
+    }
+    if entry.overriddenStatus then
+        menu[#menu + 1] = {
+            text = "Clear override (use note/rank)",
+            notCheckable = true,
+            func = function() applyPick(entry, nil, "") end,
+        }
+    end
+    showRosterMenu(menu)
 end
 
 function addon:BuildRaidersTab()
@@ -100,44 +194,9 @@ function addon:BuildRaidersTab()
     summary:SetWidth(760)
     summary:SetTextColor(0.9, 0.82, 0.5)
 
-    -- Controls row: add-guest input + raid-only filter, between the summary and the list.
-    local addBoxBg = CreateFrame("Frame", nil, panel)
-    elevateInteractiveFrame(addBoxBg, panel, 8)
-    addBoxBg:SetWidth(240)
-    addBoxBg:SetHeight(20)
-    addBoxBg:SetPoint("TOPLEFT", summary, "BOTTOMLEFT", 0, -6)
-    addBoxBg:SetBackdrop({
-        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = false,
-        edgeSize = 8,
-        insets = { left = 2, right = 2, top = 2, bottom = 2 },
-    })
-    addBoxBg:SetBackdropColor(0, 0, 0, 0.7)
-    addBoxBg:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
-
-    local addBox = CreateFrame("EditBox", nil, addBoxBg)
-    elevateInteractiveFrame(addBox, addBoxBg, 1)
-    addBox:SetPoint("TOPLEFT", addBoxBg, "TOPLEFT", 6, -2)
-    addBox:SetPoint("BOTTOMRIGHT", addBoxBg, "BOTTOMRIGHT", -6, 2)
-    addBox:SetFontObject(GameFontHighlight)
-    addBox:SetAutoFocus(false)
-    addBox:SetMaxLetters(64)
-    addBox:SetScript("OnEscapePressed", function(selfBox) selfBox:ClearFocus() end)
-
-    local addButton = createButton(panel, "Add Guest", 90, 20)
-    addButton:SetPoint("LEFT", addBoxBg, "RIGHT", 6, 0)
-    local function submitGuest()
-        if addon:AddGuestFromInput(addBox:GetText()) then
-            addBox:SetText("")
-        end
-        addBox:ClearFocus()
-    end
-    addButton:SetScript("OnClick", submitGuest)
-    addBox:SetScript("OnEnterPressed", submitGuest)
-
-    local addHint = createLabel(panel, "Name, class spec  (guests default to main)", "LEFT", addButton, "RIGHT", 8, 0)
-    addHint:SetTextColor(0.6, 0.6, 0.6)
+    local editHint = createLabel(panel, "Click a Class / Spec or Status cell to assign it (ML/leadership).", "TOPLEFT", summary, "BOTTOMLEFT", 0, -6)
+    editHint:SetTextColor(0.6, 0.6, 0.6)
+    panel.editHint = editHint
 
     local raidOnly = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
     elevateInteractiveFrame(raidOnly, panel, 8)
@@ -146,15 +205,15 @@ function addon:BuildRaidersTab()
     raidOnly:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -110, -22)
     local raidOnlyLabel = createLabel(panel, "Raid only", "LEFT", raidOnly, "RIGHT", 2, 0)
     raidOnlyLabel:SetTextColor(0.9, 0.9, 0.9)
+    panel.raidOnlyLabel = raidOnlyLabel
     raidOnly:SetScript("OnClick", function(selfCB)
         addon.db.ui.rosterRaidOnly = selfCB:GetChecked() and true or false
         addon:RefreshRaidersTab()
     end)
     panel.raidOnlyCheckbox = raidOnly
-    panel.addGuestButton = addButton
 
     local rosterFrame = createBackdropFrame("WeirdLootRaidersFrame", panel)
-    rosterFrame:SetPoint("TOPLEFT", addBoxBg, "BOTTOMLEFT", 0, -8)
+    rosterFrame:SetPoint("TOPLEFT", editHint, "BOTTOMLEFT", 0, -8)
     rosterFrame:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -4, 0)
 
     local headerPresence = createButton(rosterFrame, "Raid", 54, 18)
@@ -197,6 +256,38 @@ function addon:BuildRaidersTab()
         row.status:SetWidth(110)
         row.source = createLabel(row, "", "LEFT", row.status, "RIGHT", 12, 0)
         row.source:SetWidth(80)
+
+        -- Invisible click targets over the editable cells; entryData is stamped by the
+        -- update closure below so the menus always act on the row's current occupant.
+        -- Explicit geometry (label anchor + width, fixed height): a FontString's own rect
+        -- auto-sizes from its text and can be degenerate, which would leave a SetAllPoints
+        -- button with no clickable area.
+        row.specClick = CreateFrame("Button", nil, row)
+        elevateInteractiveFrame(row.specClick, row, 10)   -- same lift as LootTab's itemHitbox; default child level sits below the list chrome
+        row.specClick:RegisterForClicks("LeftButtonUp")
+        row.specClick:SetPoint("LEFT", row.name, "RIGHT", 4, 0)
+        row.specClick:SetWidth(200)
+        row.specClick:SetHeight(16)
+        row.specClick:SetScript("OnClick", function()
+            if WeirdLootDebugLog and WeirdLootDebugLog.enabled then
+                addon:Print("spec cell click: " .. tostring(row.entryData and row.entryData.name))
+            end
+            local ok, err = pcall(addon.OpenRosterSpecMenu, addon, row.entryData)
+            if not ok then addon:Print("Spec menu error: " .. tostring(err)) end
+        end)
+        row.statusClick = CreateFrame("Button", nil, row)
+        elevateInteractiveFrame(row.statusClick, row, 10)
+        row.statusClick:RegisterForClicks("LeftButtonUp")
+        row.statusClick:SetPoint("LEFT", row.classSpec, "RIGHT", 12, 0)
+        row.statusClick:SetWidth(110)
+        row.statusClick:SetHeight(16)
+        row.statusClick:SetScript("OnClick", function()
+            if WeirdLootDebugLog and WeirdLootDebugLog.enabled then
+                addon:Print("status cell click: " .. tostring(row.entryData and row.entryData.name))
+            end
+            local ok, err = pcall(addon.OpenRosterStatusMenu, addon, row.entryData)
+            if not ok then addon:Print("Status menu error: " .. tostring(err)) end
+        end)
     end)
     list:SetPoint("TOPLEFT", headerPresence, "BOTTOMLEFT", 0, -8)
     list:SetPoint("BOTTOMRIGHT", rosterFrame, "BOTTOMRIGHT", -6, 6)
@@ -208,12 +299,29 @@ function addon:RefreshRaidersTab()
     local panel = self.ui.panels and self.ui.panels.raiders
     if panel then
         if panel.raidOnlyCheckbox then
-            panel.raidOnlyCheckbox:SetChecked(self.db.ui.rosterRaidOnly and true or false)
+            local cb = panel.raidOnlyCheckbox
+            cb:SetChecked(self.db.ui.rosterRaidOnly and true or false)
+            -- Outside a raid the filter is inert but the toggle stays live (the choice is
+            -- saved for the next raid); desaturation is the only cue that it does nothing
+            -- right now.
+            local inRaid = #self:GetAttendees() > 0
+            local desaturate = inRaid and 0 or 1
+            if cb.GetNormalTexture and cb:GetNormalTexture() then
+                cb:GetNormalTexture():SetDesaturated(desaturate)
+            end
+            if cb.GetCheckedTexture and cb:GetCheckedTexture() then
+                cb:GetCheckedTexture():SetDesaturated(desaturate)
+            end
+            if panel.raidOnlyLabel then
+                if inRaid then
+                    panel.raidOnlyLabel:SetTextColor(0.9, 0.9, 0.9)
+                else
+                    panel.raidOnlyLabel:SetTextColor(0.5, 0.5, 0.5)
+                end
+            end
         end
-        if panel.addGuestButton then
-            local canEdit = self:IsAuthorizedLootMaster()
-                or self:IsGuildLeadership(util:GetPlayerName("player"))
-            if canEdit then panel.addGuestButton:Enable() else panel.addGuestButton:Disable() end
+        if panel.editHint then
+            if canEditRoster() then panel.editHint:Show() else panel.editHint:Hide() end
         end
     end
 
@@ -245,15 +353,20 @@ function addon:RefreshRaidersTab()
     self.ui.raidersList.update(#rosterEntries, function(row, index)
         local entry = rosterEntries[index]
         if not entry then
+            row.entryData = nil
             row:Hide()
             return
         end
         row:Show()
+        row.entryData = entry
         row.present:SetText(entry.present and "Yes" or "No")
         row.present:SetTextColor(entry.present and 0.3 or 0.7, entry.present and 0.9 or 0.3, 0.3)
         row.name:SetText((util:GetClassColorCode(entry.className) or "|cffffffff") .. util:TitleCaseWords(entry.name or "") .. "|r")
-        row.classSpec:SetText((util:GetClassColorCode(entry.className) or "|cffffffff") .. util:TitleCaseWords(string.trim((entry.className or "") .. " " .. (entry.specName or ""))) .. "|r")
-        row.status:SetText(util:PlayerDisplayStatus(entry.status))
+        -- Overridden cells get a gold star: the durable source (note/rank) is being outvoted.
+        row.classSpec:SetText((util:GetClassColorCode(entry.className) or "|cffffffff") .. util:TitleCaseWords(string.trim((entry.className or "") .. " " .. (entry.specName or ""))) .. "|r"
+            .. (entry.overriddenSpec and "|cffffcc00*|r" or ""))
+        row.status:SetText(util:PlayerDisplayStatus(entry.status)
+            .. (entry.overriddenStatus and "|cffffcc00*|r" or ""))
         if entry.isGuest then
             row.source:SetText("Guest")
             row.source:SetTextColor(1, 0.82, 0.2)

@@ -164,13 +164,16 @@ function addon:RefreshGuildRoster()
             local nameKey = util:NormalizeKey(name)
             local className = self:NormalizeClassName(classFileName or classLocalized or "")
             local specName, statusOverride = "", nil
+            local noteDataAvailable = canViewNotes
             if canViewNotes then
                 specName, statusOverride = self:ParseOfficerNote(officerNote, className)
             elseif cache and cache.notes and cache.notes[nameKey] then
                 specName = cache.notes[nameKey].s or ""
                 statusOverride = cache.notes[nameKey].o
+                noteDataAvailable = true
             end
             members[nameKey] = {
+                noteDataAvailable = noteDataAvailable,   -- gates override auto-clear: rank alone is never evidence enough
                 name = name,
                 className = className,
                 specName = specName,
@@ -186,11 +189,13 @@ function addon:RefreshGuildRoster()
         end
     end
 
-    -- With the player's own show-offline filter hidden, this scan only saw online members;
-    -- merge it over the previous map instead of replacing it, so offline members captured by
-    -- the last full scan survive (flagged offline: absent from an online-only listing means
-    -- exactly that). A scan with show-offline on is authoritative and replaces wholesale.
-    local fullScan = not GetGuildRosterShowOffline or (GetGuildRosterShowOffline() and true or false)
+    -- A scan is FULL only when it belongs to one of our own borrow cycles (we forced the
+    -- show-offline filter on before requesting, so the listing provably includes offline
+    -- members). The getter cannot be trusted as the signal: flipping the Blizzard checkbox
+    -- fires GUILD_ROSTER_UPDATE mid-transition, and misreading a filtered list as full
+    -- wholesale-drops every offline member. Non-borrow scans always merge; members who left
+    -- the guild are dropped by the next borrow (login, session start, /wl guild).
+    local fullScan = self.guildScanRestore ~= nil
     if not fullScan and self.guildRoster and self.guildRoster.members then
         for nameKey, existing in pairs(self.guildRoster.members) do
             if not members[nameKey] then
@@ -220,12 +225,106 @@ function addon:RefreshGuildRoster()
             SetGuildRosterShowOffline(false)
         end
     end
+
+    -- One-time legacy cleanup, and only against a FULL member list: a partial (online-only)
+    -- scan would read offline guildies as non-members and leave their shadow entries behind.
+    if fullScan then
+        self:PurgeGuildCoveredGuestEntries()
+    end
+
+    self:AutoClearMatchedOverrides()
     -- Note-readers refresh the shared cache on every scan: it is both what they serve to
     -- requesters and their own fallback if permissions ever change out from under them.
     if canViewNotes then
         self:StoreGuildNotesCache(self:BuildGuildNotesPayload(), util.GetPlayerName and util:GetPlayerName("player") or nil)
     end
     self:TriggerCallback("GUILD_ROSTER_REFRESHED")
+end
+
+-- One-time (stamp-gated) purge of guest-layer entries that guild data now covers. Installs
+-- that predate the guild-derived roster carry the old shipped list in SavedVariables; for
+-- current guild members those entries are a stale shadow copy (rank + officer note are
+-- authoritative), so they go. Non-members stay: that IS the guest layer. Runs on the first
+-- full guild scan rather than at login because membership isn't known until the server
+-- replies. The stamp sets even when nothing dropped, so this never re-runs against entries
+-- the user adds later.
+function addon:PurgeGuildCoveredGuestEntries()
+    local cfg = self.config
+    if not cfg or cfg.rosterGuestPurgeV1Applied then
+        return
+    end
+    local members = self.guildRoster and self.guildRoster.members
+    if not members or type(cfg.rosterEntries) ~= "table" then
+        return
+    end
+
+    local kept, dropped = {}, 0
+    for _, entry in ipairs(cfg.rosterEntries) do
+        if members[util:NormalizeKey(entry.name or "")] then
+            dropped = dropped + 1
+        else
+            kept[#kept + 1] = entry
+        end
+    end
+
+    cfg.rosterGuestPurgeV1Applied = true
+    if dropped == 0 then
+        return
+    end
+    cfg.rosterEntries = kept
+    cfg.revision = (cfg.revision or 0) + 1
+    self:NormalizeAllConfig()
+    if self.roster then
+        self:RefreshRoster()
+    end
+    self:TriggerCallback("CONFIG_UPDATED")
+    self:Print(string.format("Roster: cleared %d legacy entr%s now covered by guild data.",
+        dropped, dropped == 1 and "y" or "ies"))
+end
+
+-- Overrides exist to correct the durable sources until they catch up; once rank+note derive
+-- the same value, the override is pure liability (it would silently outvote the NEXT note or
+-- rank change). Auto-clear per-field after each scan, but only for members whose scan carried
+-- actual note data (live read or a relay-cache hit): a blind rank-only derivation could
+-- coincidentally match while a hidden note token disagrees. No broadcast: every client that
+-- sees the matching note computes the same clear; a blind client keeps the override, which is
+-- behaviorally identical while the values match and converges on its next relay.
+function addon:AutoClearMatchedOverrides()
+    local overrides = self.config and self.config.rosterOverrides
+    if not overrides or not (self.guildRoster and self.guildRoster.members) then
+        return
+    end
+
+    local cleared = 0
+    for nameKey, override in pairs(overrides) do
+        local member = self.guildRoster.members[nameKey]
+        if member and member.noteDataAvailable then
+            local keepSpec = override.specName
+            local keepStatus = override.status
+            if keepSpec and member.specName == keepSpec then
+                keepSpec = nil
+            end
+            -- member.status is the durable derivation (note token, else rank).
+            if keepStatus and member.status == keepStatus then
+                keepStatus = nil
+            end
+            if keepSpec ~= override.specName or keepStatus ~= override.status then
+                cleared = cleared + 1
+                if not keepSpec and not keepStatus then
+                    overrides[nameKey] = nil
+                else
+                    overrides[nameKey] = { name = override.name, specName = keepSpec, status = keepStatus }
+                end
+            end
+        end
+    end
+
+    if cleared > 0 then
+        self.config.revision = (self.config.revision or 0) + 1
+        self:TriggerCallback("CONFIG_UPDATED")
+        self:Print(string.format("Roster: %d override%s cleared (now matching note/rank).",
+            cleared, cleared == 1 and "" or "s"))
+    end
 end
 
 -- Roster-edit authority beyond the ML: guild rank at or above (numerically at or below)

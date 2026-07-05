@@ -445,25 +445,76 @@ function addon:GetRosterProfile(playerName)
     -- guests, and fills in a spec the note doesn't provide yet, so an unpopulated officer note
     -- degrades to the configured spec instead of blanking it. Spec fill only when the classes
     -- agree: a stale configured entry for a rerolled name must not graft a foreign spec.
+    local profile
     local guildProfile = self.GetGuildMemberProfile and self:GetGuildMemberProfile(playerName)
     if not guildProfile then
-        return configured
-    end
-    if guildProfile.specName ~= ""
+        profile = configured
+    elseif guildProfile.specName ~= ""
         or not configured
         or (configured.specName or "") == ""
         or configured.className ~= guildProfile.className then
-        return guildProfile
+        profile = guildProfile
+    else
+        profile = {
+            name = guildProfile.name,
+            className = guildProfile.className,
+            specName = configured.specName,
+            status = guildProfile.status,
+            rankName = guildProfile.rankName,
+            rankIndex = guildProfile.rankIndex,
+            online = guildProfile.online,
+        }
+    end
+
+    -- The on-the-fly override layer beats everything: a Raiders-tab pick must win over a
+    -- stale officer note until it is cleared. Per-field, so a status-only override leaves the
+    -- note's spec alone. Flags let the tab mark overridden cells.
+    local override = self.GetRosterOverride and self:GetRosterOverride(playerName)
+    if not override or not profile then
+        return profile
     end
     return {
-        name = guildProfile.name,
-        className = guildProfile.className,
-        specName = configured.specName,
-        status = guildProfile.status,
-        rankName = guildProfile.rankName,
-        rankIndex = guildProfile.rankIndex,
-        online = guildProfile.online,
+        name = profile.name,
+        className = profile.className,
+        specName = override.specName or profile.specName,
+        status = override.status or profile.status,
+        rankName = profile.rankName,
+        rankIndex = profile.rankIndex,
+        online = profile.online,
+        overriddenSpec = override.specName and true or nil,
+        overriddenStatus = override.status and true or nil,
     }
+end
+
+-- Persistent per-player override layer, written by the Raiders tab dropdowns ("stored for
+-- next time": survives reloads in SavedVariables). Used for guild members, whose durable
+-- sources (rank, officer note) the clicker may not be able to edit; non-guildies write their
+-- guest-layer entry directly instead, since that entry is already wholly ours. Passing both
+-- fields empty clears the record. Broadcast is the caller's job (SendRosterOverride).
+function addon:SetRosterOverride(playerName, specName, status)
+    if not playerName or playerName == "" then
+        return false
+    end
+    local key = util:NormalizeKey(playerName)
+    self.config.rosterOverrides = self.config.rosterOverrides or {}
+    if (specName or "") == "" and (status or "") == "" then
+        self.config.rosterOverrides[key] = nil
+    else
+        self.config.rosterOverrides[key] = {
+            name = playerName,
+            specName = (specName or "") ~= "" and util:NormalizeKey(specName) or nil,
+            status = (status or "") ~= "" and status or nil,
+        }
+    end
+    self.config.revision = (self.config.revision or 0) + 1
+    self:RefreshRoster()
+    self:TriggerCallback("CONFIG_UPDATED")
+    return true
+end
+
+function addon:GetRosterOverride(playerName)
+    local overrides = self.config and self.config.rosterOverrides
+    return overrides and overrides[util:NormalizeKey(playerName or "")] or nil
 end
 
 function addon:GetLootRule(itemName)

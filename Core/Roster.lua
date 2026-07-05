@@ -67,6 +67,8 @@ function addon:BuildRosterDisplay(attendeesByName)
             present = attendeesByName[key] ~= nil,
             descriptor = util:NormalizeKey((profile.className or "") .. " " .. (profile.specName or "")),
             source = "guild",
+            overriddenSpec = profile.overriddenSpec,
+            overriddenStatus = profile.overriddenStatus,
         }
         seen[key] = true
     end

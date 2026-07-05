@@ -532,6 +532,29 @@ function addon:OnGuestUpsert(sender, fields)
     self:Print(string.format("Roster: %s updated by %s.", util:TitleCaseWords(name), sender or "?"))
 end
 
+-- Spec/status override for one player, pushed by whoever set it (same authority model as
+-- GUEST_UPSERT). Sends the override's full current state, so a clear ("" both fields)
+-- converges too.
+function addon:SendRosterOverride(playerName)
+    local override = self:GetRosterOverride(playerName)
+    self:SendLargeMessage("ROSTER_OVERRIDE", {
+        playerName or "",
+        (override and override.specName) or "",
+        (override and override.status) or "",
+    }, "RAID")
+end
+
+function addon:OnRosterOverride(sender, fields)
+    local senderKey = util:NormalizeKey(sender or "")
+    local isLootMaster = senderKey ~= "" and senderKey == util:NormalizeKey(self:GetLootMasterName() or "")
+    if not isLootMaster and not self:IsGuildLeadership(sender) then
+        return
+    end
+    local name = fields[1] or ""
+    if name == "" then return end
+    self:SetRosterOverride(name, fields[2] or "", fields[3] or "")
+end
+
 -- Live pick list for a rolling lot, pushed ML -> raid as an EPHEMERAL, display-only signal so
 -- raiders can see who is rolling in real time. Picks are otherwise coalesced (they do not sync
 -- until the roll resolves), so without this a raider's popup would show a frozen ~0 count. This
@@ -609,6 +632,8 @@ function addon:HandleCommMessage(sender, value)
         self:OnRollStateMessage(fields)
     elseif command == "GUEST_UPSERT" then
         self:OnGuestUpsert(sender, fields)
+    elseif command == "ROSTER_OVERRIDE" then
+        self:OnRosterOverride(sender, fields)
     elseif command == "GNOTES_REQ" then
         self:OnGuildNotesRequest(sender)
     elseif command == "GNOTES" then

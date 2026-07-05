@@ -129,8 +129,16 @@ H.test("Raiders tab: guests sort first and raid-only filters", function()
 
     w.addon.db.ui.rosterRaidOnly = true
     sorted = w.addon:GetSortedRosterEntries()
-    H.eq(#sorted, 2, "raid-only drops absent entries")
+    H.eq(#sorted, 3, "raid-only is inert outside a raid: full guild view")
+
+    -- The harness stubs GetAttendees to {} ("not in a group"); swap it locally to simulate
+    -- a raid. Promote to a framework helper if more raid-dependent tests accumulate.
+    local stubbedGetAttendees = w.addon.GetAttendees
+    w.addon.GetAttendees = function() return { { name = "aaron" }, { name = "zug" } } end
+    sorted = w.addon:GetSortedRosterEntries()
+    H.eq(#sorted, 2, "raid-only drops absent entries when actually in a raid")
     H.eq(sorted[1].name, "zug", "guest still first")
+    w.addon.GetAttendees = stubbedGetAttendees
 
     w.addon.db.ui.rosterRaidOnly = false
     w.addon:RefreshRaidersTab()
