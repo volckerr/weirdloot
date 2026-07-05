@@ -26,6 +26,8 @@ local ROW_GAP = 2                   -- vertical gap between stacked rows
 local BB_MAX_LOOT = 8
 local BADGE_SIZE = 37               -- minimalist per-card badge (dice/bag), same size as the loot icon
 local MINIMAL_PAD = 6               -- minimalist top/bottom padding (no chrome to reserve)
+local MINIMAL_BG_BOOST = 0.4        -- minimalist-only second pass of the row art: no dark chrome behind the
+                                    -- cards, so thicken the colored background slightly (alpha of the extra layer)
 
 -- Minimalist mode: drop the banner header/footer chrome and turn the dice/bag medallion into a per-card
 -- badge that peeks off each card's left edge (half behind the item icon). Same backend, two looks; the
@@ -333,13 +335,30 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
         lootFrame.Badge:Show()
         lootFrame.IconHitBox.IconBorder:Hide()   -- the card's own quality border stands in for it
         lootFrame:SetBackdropBorderColor(rarityColor.r, rarityColor.g, rarityColor.b, 1)
+        lootFrame.Background2:SetVertexColor(rarityColor.r, rarityColor.g, rarityColor.b)
+        lootFrame.Background2:Show()
     else
         lootFrame.Badge:Hide()
+        lootFrame.Background2:Hide()
         lootFrame:SetBackdropBorderColor(0, 0, 0, 0)   -- hidden in full mode (SetItemButtonQuality shows the icon frame)
     end
 end
 
 local ROW_FADE_TIME = 0.4   -- seconds a row takes to fade out once its lifetime ends
+
+-- "Players Rolling" hover: bracket priority order for the roller list, mirroring the roll popup's
+-- count hover (rollerSort in LiveRoll): highest bracket first, then name.
+local BRACKET_RANK = { BiS = 1, MS = 2, MU = 3, OS = 4, TM = 5, Pass = 6 }
+local function sortedRollers(list)
+    local out = {}
+    for _, r in ipairs(list or {}) do out[#out + 1] = r end
+    table.sort(out, function(a, b)
+        local ra, rb = BRACKET_RANK[a.bracket] or 99, BRACKET_RANK[b.bracket] or 99
+        if ra ~= rb then return ra < rb end
+        return string.lower(a.name or "") < string.lower(b.name or "")
+    end)
+    return out
+end
 
 -- diagnostic: trace a drop row's lifecycle (add branch, dismiss, fade, revive, remove) into the
 -- existing debug log so `/wl debug dump` shows the show/hide timeline. Gated on the log being on.
@@ -504,14 +523,62 @@ local function buildBanner(bannerName, medallionCfg)
     end
 
     local function BossBanner_OnLootItemLeave()
-        if BossBanner.showingTooltip then
+        if BossBanner.showingTooltip or BossBanner.showingRollerTip then
             GameTooltip:Hide()
             BossBanner.showingTooltip = false
+            BossBanner.showingRollerTip = false
         end
+    end
+
+    -- "Players Rolling" hover: any non-interactive spot on the banner (chrome or a roll card)
+    -- lists every live roll's rollers, bracket-sorted, like the roll popup's count hover. Cards
+    -- carry a getRollers thunk (demo data for now; the real feed will read the live registrants).
+    -- Kept out of showingTooltip on purpose: the roll countdown must not pause under this hover.
+    local function showRollersTooltip(owner)
+        if BossBanner.animState == BB_STATE_BANNER_OUT or BossBanner.showingTooltip then return end
+        -- hovering a roll card scopes the list to that item; banner chrome shows every live roll
+        local cards = {}
+        if owner.getRollers then
+            if owner.alive and not owner.fading and owner.rollDuration then cards[1] = owner end
+        else
+            for _, f in ipairs(BossBanner.LootFrames) do
+                if f.alive and not f.fading and f.rollDuration and f.getRollers then
+                    cards[#cards + 1] = f
+                end
+            end
+        end
+        if #cards == 0 then
+            -- the last roll card fell off while the hover was open: retire the stale tooltip
+            if BossBanner.showingRollerTip then
+                GameTooltip:Hide()
+                BossBanner.showingRollerTip = false
+            end
+            return
+        end
+        anchorBannerTooltip(owner)
+        GameTooltip:AddLine("Players Rolling", 1, 0.82, 0)
+        for i, f in ipairs(cards) do
+            if i > 1 then GameTooltip:AddLine(" ") end
+            local q = ITEM_QUALITY_COLORS[f.itemRarity or 1]
+            GameTooltip:AddLine(f.itemName or "", q.r, q.g, q.b)
+            local entries = sortedRollers(f.getRollers())
+            if #entries == 0 then
+                GameTooltip:AddLine("No rollers yet", 0.6, 0.6, 0.6)
+            else
+                for _, e in ipairs(entries) do
+                    local nameText = util:IsSelfName(e.name) and "You" or e.name
+                    GameTooltip:AddLine(util:ColorPlayerText(e.name, e.class, nameText .. " - " .. (e.bracket or "?")), 1, 1, 1)
+                end
+            end
+        end
+        GameTooltip:Show()
+        BossBanner.showingRollerTip = true
+        owner.UpdateTooltip = showRollersTooltip   -- rollers keep arriving while the hover is open
     end
 
     local function BossBanner_OnRowEnter(self)
         if BossBanner.animState == BB_STATE_BANNER_OUT or BossBanner.showingTooltip then return end
+        if self.rollDuration then return showRollersTooltip(self) end   -- roll card: who is in so far
         anchorBannerTooltip(self)
         local q = ITEM_QUALITY_COLORS[self.itemRarity or 1]
         GameTooltip:AddLine(self.itemName or "", q.r, q.g, q.b)
@@ -550,6 +617,18 @@ local function buildBanner(bannerName, medallionCfg)
         frame:EnableMouse(true)
         frame:SetScript("OnEnter", BossBanner_OnRowEnter)
         frame:SetScript("OnLeave", BossBanner_OnLootItemLeave)
+        -- rows blanket the banner and swallow its mouse, so they forward region dragging to the
+        -- parent's hooks (set by enableRegionDrag, which runs after this factory); buttons and the
+        -- loot icon capture their own mouse and stay non-draggy
+        frame:RegisterForDrag("LeftButton")
+        frame:SetScript("OnDragStart", function(self)
+            local p = self:GetParent()
+            if p.onRegionDragStart then p.onRegionDragStart() end
+        end)
+        frame:SetScript("OnDragStop", function(self)
+            local p = self:GetParent()
+            if p.onRegionDragStop then p.onRegionDragStop() end
+        end)
 
         local effectiveScale = frame:GetEffectiveScale()
 
@@ -558,6 +637,16 @@ local function buildBanner(bannerName, medallionCfg)
         Background:SetBlendMode("BLEND")
         Background = SetAtlas(Background, "LootBanner-ItemBg", true)
         Background:SetPoint("CENTER")
+
+        -- the opacity booster layer (minimalist only): the row art restacked on itself so the card
+        -- reads denser without the banner chrome behind it. Tracks Background's size and tint.
+        frame.Background2 = frame:CreateTexture(nil, "BACKGROUND")
+        local Background2 = frame.Background2
+        Background2:SetBlendMode("BLEND")
+        Background2 = SetAtlas(Background2, "LootBanner-ItemBg", true)
+        Background2:SetAllPoints(Background)
+        Background2:SetAlpha(MINIMAL_BG_BOOST)
+        Background2:Hide()
 
         frame.Icon = frame:CreateTexture(nil, "OVERLAY")
         local Icon = frame.Icon
@@ -573,9 +662,15 @@ local function buildBanner(bannerName, medallionCfg)
         local Badge = frame.Badge
         Badge:SetSize(BADGE_SIZE, BADGE_SIZE)
         Badge:SetPoint("CENTER", Icon, "LEFT", -8, 0)   -- nudged left so more of the badge peeks out
-        if medallionCfg and medallionCfg.texture then
-            Badge:SetTexture(medallionCfg.texture)
-            Badge:SetTexCoord(0, 1, 0, 1)
+        -- badgeTexture overrides the per-card badge only; the full-chrome medallion keeps its atlas
+        local badgeTex = medallionCfg and (medallionCfg.badgeTexture or medallionCfg.texture)
+        if badgeTex then
+            Badge:SetTexture(badgeTex)
+            if medallionCfg.badgeFlipH then
+                Badge:SetTexCoord(1, 0, 0, 1)   -- mirrored horizontally
+            else
+                Badge:SetTexCoord(0, 1, 0, 1)
+            end
         else
             SetAtlas(Badge, (medallionCfg and medallionCfg.atlas) or "LootBanner-LootBagCircle", false)
         end
@@ -1093,18 +1188,36 @@ local function buildBanner(bannerName, medallionCfg)
             frame.RollTimer:SetStatusBarColor(0, 1, 0.1)
             frame.RollTimer:Show()
             frame.selectedBracket = nil
+            frame.getRollers = data.getRollers
             for _, btn in ipairs(frame.RollButtons) do
                 btn:SetAlpha(1)   -- a reused slot may carry a stale fade alpha from its previous life
                 btn:UnlockHighlight()
                 -- Set the text color explicitly for the button's state so the look is deterministic and
                 -- doesn't depend on Disable()'s font handling: gray for restricted brackets (mirrors the
                 -- roll popup's styleButtonText), gold otherwise.
-                if data.disabled and data.disabled[btn.bracket] then
+                local why = data.disabled and data.disabled[btn.bracket]
+                if why then
                     btn:Disable()
                     btn:GetFontString():SetTextColor(0.5, 0.5, 0.5)
+                    -- a string value carries the reason; explain the dead button on hover like the
+                    -- roll popup does (motion scripts let a disabled button still see the mouse)
+                    btn:SetMotionScriptsWhileDisabled(true)
+                    if type(why) == "string" then
+                        btn:SetScript("OnEnter", function(b)
+                            GameTooltip:SetOwner(b, "ANCHOR_RIGHT")
+                            GameTooltip:SetText(why, 1, 0.3, 0.3, true)
+                            GameTooltip:Show()
+                        end)
+                        btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+                    else
+                        btn:SetScript("OnEnter", nil)
+                        btn:SetScript("OnLeave", nil)
+                    end
                 else
                     btn:Enable()
                     btn:GetFontString():SetTextColor(1, 0.82, 0)
+                    btn:SetScript("OnEnter", nil)   -- a reused slot may carry a stale disabled tooltip
+                    btn:SetScript("OnLeave", nil)
                 end
                 btn:Show()
             end
@@ -1127,6 +1240,7 @@ local function buildBanner(bannerName, medallionCfg)
         end
         rbDbg(("add-WON idx=%s reused=%s rd=%s HIDE-buttons"):format(tostring(frame.__idx), tostring(reused), tostring(data.rollDuration)))
         frame.rollDuration = nil
+        frame.getRollers = nil
         frame.RollTimer:Hide()
         for _, btn in ipairs(frame.RollButtons) do btn:Hide() end
         frame.onMLEnd, frame.onMLCancel = nil, nil
@@ -1290,8 +1404,9 @@ local function buildBanner(bannerName, medallionCfg)
         local banner = animOut:GetParent()
         rbDbg(("OUT-done %s"):format(bannerName))
         banner.animState = nil
-        if banner.showingTooltip then GameTooltip:Hide() end
+        if banner.showingTooltip or banner.showingRollerTip then GameTooltip:Hide() end
         banner.showingTooltip = false
+        banner.showingRollerTip = false
         banner.hoveredThisVisit = false
         banner.hoverGrace = nil
         banner:Hide()
@@ -1410,6 +1525,7 @@ local function buildBanner(bannerName, medallionCfg)
             onChosen = item.onChosen,   -- roll card only: fired with the chosen bracket when the card is dismissed
             onMLEnd = item.onMLEnd,     -- roll card only: ML control; present = show the End button, fired on click
             onMLCancel = item.onMLCancel, -- roll card only: ML control; present = show the Cancel button
+            getRollers = item.getRollers, -- roll card only: thunk returning { name, class, bracket } rollers for the hover
         }
         if self.animState == BB_STATE_LOOT_INSERT then
             addRow(self, data)
@@ -1462,17 +1578,11 @@ local function buildBanner(bannerName, medallionCfg)
         end
     end
 
-    local function BossBanner_OnMouseDown(frame, button)
-        if button == "RightButton" then
-            BossBanner_Stop(frame)
-            wipe(frame.pendingLoot)
-            BossBanner_OnAnimOutFinished(frame.AnimOut)
-        end
-    end
-
     BossBanner_OnLoad(BossBanner)
     BossBanner:SetScript("OnUpdate", BossBanner_OnUpdate)
-    BossBanner:SetScript("OnMouseDown", BossBanner_OnMouseDown)
+    -- chrome hover (rows and buttons capture their own mouse): same roller list as a roll card
+    BossBanner:SetScript("OnEnter", showRollersTooltip)
+    BossBanner:SetScript("OnLeave", BossBanner_OnLootItemLeave)
     BossBanner:HookScript("OnShow", function() if BossBanner.onLayoutChanged then BossBanner.onLayoutChanged() end end)
     BossBanner:HookScript("OnHide", function() if BossBanner.onLayoutChanged then BossBanner.onLayoutChanged() end end)
 
@@ -1481,23 +1591,67 @@ end
 
 ------------------------------------------------------------------
 -- Two banner instances stacked in one region: drops (dice) above, awarded (bag) below.
-local awardedBanner = buildBanner("WeirdLootAwardedBanner", { atlas = "LootBanner-LootBagCircle" })
+local awardedBanner = buildBanner("WeirdLootAwardedBanner",
+    { atlas = "LootBanner-LootBagCircle", badgeTexture = "Interface\\Icons\\INV_Misc_Bag_10", badgeFlipH = true })
 local dropsBanner = buildBanner("WeirdLootDropsBanner", { texture = DICE_TEXTURE })
 
 local REGION_TOP = -120
 -- positive pulls the awarded banner UP into the drops banner's bottom chrome reserve, closing the
 -- dead space between the last drop row and the awarded medallion. Tune to taste.
 local REGION_OVERLAP = 34
+
+-- One movable anchor owns the whole loot region: dragging either banner moves rolls + wins
+-- together, and the spot persists (db.ui.lootBannerRegion). Default is top-center.
+local bannerRegion = CreateFrame("Frame", "WeirdLootBannerRegion", UIParent)
+bannerRegion:SetSize(1, 1)
+bannerRegion:SetPoint("TOP", UIParent, "TOP", 0, REGION_TOP)
+bannerRegion:SetMovable(true)
+
+local function saveRegionPosition()
+    if not (addon.db and addon.db.ui) then return end
+    local point, _, relativePoint, x, y = bannerRegion:GetPoint()
+    addon.db.ui.lootBannerRegion = { point = point, relativePoint = relativePoint, x = x, y = y }
+end
+
+-- lazy one-shot: the file loads before the saved variables do, so the first layout after the db
+-- exists puts the region back where the player last dragged it
+local regionRestored
+local function restoreRegionPosition()
+    if regionRestored or not (addon.db and addon.db.ui) then return end
+    regionRestored = true
+    local pos = addon.db.ui.lootBannerRegion
+    if not pos or not pos.point then return end
+    bannerRegion:ClearAllPoints()
+    bannerRegion:SetPoint(pos.point, UIParent, pos.relativePoint or pos.point, pos.x or 0, pos.y or 0)
+end
+
+local function enableRegionDrag(banner)
+    local function dragStart() bannerRegion:StartMoving() end
+    local function dragStop()
+        bannerRegion:StopMovingOrSizing()
+        saveRegionPosition()
+    end
+    banner:RegisterForDrag("LeftButton")
+    banner:SetScript("OnDragStart", dragStart)
+    banner:SetScript("OnDragStop", dragStop)
+    -- the loot rows forward their drags here (they exist before the region anchor does)
+    banner.onRegionDragStart = dragStart
+    banner.onRegionDragStop = dragStop
+end
+enableRegionDrag(dropsBanner)
+enableRegionDrag(awardedBanner)
+
 local function layoutRegion()
+    restoreRegionPosition()
     dropsBanner:ClearAllPoints()
-    dropsBanner:SetPoint("TOP", UIParent, 0, REGION_TOP)
+    dropsBanner:SetPoint("TOP", bannerRegion, "TOP", 0, 0)
     awardedBanner:ClearAllPoints()
     if dropsBanner:IsShown() then
         -- full mode overlaps into the drops footer chrome; minimalist has none, so just leave a small gap
         local gap = minimalMode and -MINIMAL_PAD or REGION_OVERLAP
         awardedBanner:SetPoint("TOP", dropsBanner, "BOTTOM", 0, gap)   -- moves as drops resizes
     else
-        awardedBanner:SetPoint("TOP", UIParent, 0, REGION_TOP)
+        awardedBanner:SetPoint("TOP", bannerRegion, "TOP", 0, 0)
     end
 end
 dropsBanner.onLayoutChanged = layoutRegion
@@ -1642,8 +1796,24 @@ local function runBannerExample()
         -- drop row: clickable bracket buttons + a roll countdown bar driven by the configured duration
         local rollDur = (addon.db and addon.db.options and tonumber(addon.db.options.rollDuration)) or 30
         local awarded = false
+        -- EXAMPLE ONLY: rollers trickle in over the countdown's first half so the "Players Rolling"
+        -- hover has live content. The real feed will read the roll's registrants instead.
+        local rollers = {}
+        local exampleBrackets = { "BiS", "MS", "MU", "OS", "TM" }
+        local pool = {}
+        for _, p in ipairs(roster) do pool[#pool + 1] = p end
+        for i = #pool, 2, -1 do local j = math.random(i); pool[i], pool[j] = pool[j], pool[i] end
+        for _ = 1, math.random(2, math.min(5, #pool)) do
+            local p = table.remove(pool)
+            exampleAfter(0.5 + math.random() * rollDur * 0.4, function()
+                if not awarded then
+                    rollers[#rollers + 1] = { name = p.n, class = p.c, bracket = exampleBrackets[math.random(#exampleBrackets)] }
+                end
+            end)
+        end
         return { link = base.link, icon = base.icon, quantity = 1, rollDuration = rollDur,
             prio = samplePrios[math.random(#samplePrios)],
+            getRollers = function() return rollers end,
             -- EXAMPLE ONLY: when the player dismisses this roll by selecting a bracket twice, drop the
             -- same item into the won section ~2s later, as if the roll resolved in their favor. Real
             -- banners get wins from the loot master's resolve, never from a local click; this only
@@ -1665,8 +1835,15 @@ local function runBannerExample()
     end
 
     -- DROPS banner: a couple of items up for roll (dice medallion).
+    -- preview #1: standard disabled brackets, each with the popup's hover reason for its dead button
     local firstRoll = rollItem()
-    if firstRoll then firstRoll.disabled = { MU = true, OS = true, TM = true } end   -- preview #1: standard disabled brackets
+    if firstRoll then
+        firstRoll.disabled = {
+            MU = "Your class cannot use this item.",
+            OS = "Not used for this item type.",
+            TM = "You already have this unique item.",
+        }
+    end
     addon:AddRollBannerItem(firstRoll)
     addon:AddRollBannerItem(rollItem())
 
