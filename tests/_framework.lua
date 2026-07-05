@@ -445,8 +445,8 @@ end
 self.ADDON_FILES = {
     "Libs/WeirdSync-1.0/WeirdSync-1.0.lua",
     "Core.lua",
-    "Core/Util.lua", "Core/Config.lua", "Core/Comm.lua", "Core/Roster.lua",
-    "Data/RosterDefaults.lua", "Data/BlacklistPresets.lua",
+    "Core/Util.lua", "Core/Config.lua", "Core/Comm.lua", "Core/Roster.lua", "Core/GuildRoster.lua",
+    "Data/BlacklistPresets.lua",
     "Data/BlacklistPresets/Priest.lua", "Data/BlacklistPresets/Mage.lua",
     "Data/BlacklistPresets/Warrior.lua", "Data/BlacklistPresets/DeathKnight.lua",
     "Data/BlacklistPresets/Hunter.lua", "Data/BlacklistPresets/Rogue.lua",
@@ -461,7 +461,7 @@ self.ADDON_FILES = {
 -- UI is normally omitted (heavy FrameXML, irrelevant to loot accounting), but the UI-load smoke
 -- suite loads it into the same mocked env to prove it loads + InitializeUI runs. Keep this list in
 -- the toc's UI load order; when UI.lua is split into UI/<tab>.lua files, list them all here.
-self.UI_FILES = { "UI/UI.lua", "UI/Common.lua", "UI/Export.lua", "UI/Minimap.lua", "UI/RaidersTab.lua", "UI/ResultsTab.lua", "UI/MasterTab.lua", "UI/OptionsTab.lua", "UI/LootTab.lua" }
+self.UI_FILES = { "UI/UI.lua", "UI/Common.lua", "UI/Export.lua", "UI/Minimap.lua", "UI/RaidersTab.lua", "UI/ResultsTab.lua", "UI/MasterTab.lua", "UI/OptionsTab.lua", "UI/LootTab.lua", "UI/GuildSpec.lua" }
 
 function self.loadUI(w)
     for _, path in ipairs(self.UI_FILES) do

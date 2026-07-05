@@ -320,6 +320,17 @@ function addon:DecodeLotValue(v)
     return lot, v.seq or 0, v.rollRemaining
 end
 
+-- The session-scoped officer-note need: this client is blind and no full-size/complete
+-- payload has landed for the current session yet. Rides the snapshot M line (instant
+-- serve trigger at officer join) and drives the GUILD-channel repoll (MaybeRepollGuildNotes),
+-- which is what reaches officers outside the raid or logging in late.
+function addon:SyncNeedsNotes()
+    local session = (self.GetCurrentSession and self:GetCurrentSession()) or self.session
+    if not session then return false end
+    return (self.guildRoster and not self.guildRoster.canViewNotes
+        and self._gnotesSessionId ~= session.id) and true or false
+end
+
 -- Host snapshot builder for WeirdSync. Emits one line per piece of state: an "M" meta line
 -- (loot-master name + core seq), an "A" line per attendee, and an "L" line per live/resolved
 -- lot. WeirdSync frames these as SB -> lines -> SD and carries them reliably.
@@ -327,11 +338,28 @@ function addon:SyncBuildSnapshot(emit)
     local session = self:GetCurrentSession()
     local core = self.lootCore
     -- 4th field: the ML's accepting-trades flag, so raiders can show a "not accepting trades"
-    -- warning on the minimap button. Additive; older raiders ignore the extra field.
+    -- warning on the minimap button. 5th: the ML still lacks officer-note data for this
+    -- session -- the need travels with the session state, and any note-reading client that
+    -- receives it answers unprompted (MaybeServeGuildNotes). Both additive; older raiders
+    -- ignore the extra fields.
+    local needsNotes = self:SyncNeedsNotes()
+    self:LogCoreEvent("snap_meta", { need = needsNotes and 1 or 0,
+        hasroster = self.guildRoster and 1 or 0,
+        view = (self.guildRoster and self.guildRoster.canViewNotes) and 1 or 0,
+        satisfied = self._gnotesSessionId == session.id and 1 or 0 })
     emit({ "M", self:GetLootMasterName() or "", tostring(core.seq or 0),
-        self:IsLootMasterAcceptingTrades() and "1" or "0" })
+        self:IsLootMasterAcceptingTrades() and "1" or "0",
+        needsNotes and "1" or "0" })
     for _, attendee in ipairs(session.attendees or {}) do
         emit({ "A", attendee.name or "", attendee.className or "", attendee.specName or "", attendee.status or "nil" })
+        -- "O" line: the ML's spec/status override for this attendee, so re-loggers and late
+        -- joiners converge on overrides they missed live (ROSTER_OVERRIDE is set-time only).
+        -- Scoped strictly to CURRENT attendees -- never the whole override store -- and
+        -- upsert-only on the receiving side: absence of a line clears nothing.
+        local override = self.GetRosterOverride and self:GetRosterOverride(attendee.name)
+        if override then
+            emit({ "O", attendee.name or "", override.specName or "", override.status or "" })
+        end
     end
     for _, lot in ipairs(core:All()) do
         if lot.state == core.STATE.RESOLVED or core:LiveCount(lot.id) > 0 then
@@ -355,6 +383,7 @@ function addon:SyncApplySnapshot(lines, epoch)
     if self.ui then self.ui.selectedResult = nil end
 
     local lots, seq = {}, 0
+    local mlNeedsNotes = false
     for _, f in ipairs(lines) do
         local tag = f[1]
         if tag == "M" then
@@ -363,10 +392,18 @@ function addon:SyncApplySnapshot(lines, epoch)
             seq = math.max(seq, tonumber(f[3]) or 0)
             -- A missing 4th field (older ML) defaults to accepting, so we never warn on stale data.
             self._mlAcceptingTrades = (f[4] == nil) or (f[4] == "1")
+            mlNeedsNotes = f[5] == "1"
         elseif tag == "A" then
             self.session.attendees[#self.session.attendees + 1] = {
                 name = f[2], className = f[3], specName = f[4], status = f[5],
             }
+        elseif tag == "O" then
+            -- ML's override for an in-raid player: adopt it (upsert only; WeirdSync already
+            -- guarantees the snapshot's authority). Records always carry at least one field,
+            -- so this can never act as a clear.
+            if (f[3] or "") ~= "" or (f[4] or "") ~= "" then
+                self:SetRosterOverride(f[2], f[3] or "", f[4] or "")
+            end
         elseif tag == "L" then
             local lot, lotSeq, remaining = self:DecodeLotValue(f)
             lots[#lots + 1] = lot
@@ -379,6 +416,13 @@ function addon:SyncApplySnapshot(lines, epoch)
     -- minimap UI may not be loaded)
     if self.UpdateMinimapTradeStatus then self:UpdateMinimapTradeStatus() end
     if self.UpdateMinimapMLActive then self:UpdateMinimapMLActive() end
+    -- The snapshot's meta says the ML lacks note data: if this client can read notes, the
+    -- snapshot IS the request.
+    self:LogCoreEvent("snap_need", { need = mlNeedsNotes and 1 or 0,
+        ml = self.roster.lootMasterName or "?" })
+    if mlNeedsNotes and self.MaybeServeGuildNotes then
+        self:MaybeServeGuildNotes(self.roster.lootMasterName, epoch)
+    end
 end
 
 -- Host delta applier (raider): one lot upsert.
@@ -502,6 +546,55 @@ function addon:BroadcastRoster()
     self:Print("Broadcast roster sent to raid.")
 end
 
+-- One roster entry, pushed by whoever edited it to the whole raid. Unlike ROSTER_SYNC (a
+-- full-text ML mirror), this is a single upsert accepted from any authorized editor (ML or
+-- guild leadership), so leadership can register a mid-raid guest without routing through the
+-- ML. Sender applies locally first; receivers converge via OnGuestUpsert.
+function addon:SendGuestUpsert(entry)
+    self:SendLargeMessage("GUEST_UPSERT", {
+        entry.name or "",
+        entry.className or "",
+        entry.specName or "",
+        entry.status or "nil",
+    }, "RAID")
+end
+
+function addon:OnGuestUpsert(sender, fields)
+    if not self:IsGuildLeadership(sender) then
+        return
+    end
+    local name = fields[1] or ""
+    if name == "" then return end
+    self:UpsertRosterEntry({
+        name = name,
+        className = self:NormalizeClassName(fields[2] or ""),
+        specName = util:NormalizeKey(fields[3] or ""),
+        status = self:NormalizeStatus(fields[4] or ""),
+    })
+    self:Print(string.format("Roster: %s updated by %s.", util:TitleCaseWords(name), sender or "?"))
+end
+
+-- Spec/status override for one player, pushed by whoever set it (same authority model as
+-- GUEST_UPSERT). Sends the override's full current state, so a clear ("" both fields)
+-- converges too.
+function addon:SendRosterOverride(playerName)
+    local override = self:GetRosterOverride(playerName)
+    self:SendLargeMessage("ROSTER_OVERRIDE", {
+        playerName or "",
+        (override and override.specName) or "",
+        (override and override.status) or "",
+    }, "RAID")
+end
+
+function addon:OnRosterOverride(sender, fields)
+    if not self:IsGuildLeadership(sender) then
+        return
+    end
+    local name = fields[1] or ""
+    if name == "" then return end
+    self:SetRosterOverride(name, fields[2] or "", fields[3] or "")
+end
+
 -- Live pick list for a rolling lot, pushed ML -> raid as an EPHEMERAL, display-only signal so
 -- raiders can see who is rolling in real time. Picks are otherwise coalesced (they do not sync
 -- until the roll resolves), so without this a raider's popup would show a frozen ~0 count. This
@@ -577,5 +670,17 @@ function addon:HandleCommMessage(sender, value)
         self:OnCancelMessage(fields)
     elseif command == "RSTATE" then
         self:OnRollStateMessage(fields)
+    elseif command == "GUEST_UPSERT" then
+        self:OnGuestUpsert(sender, fields)
+    elseif command == "ROSTER_OVERRIDE" then
+        self:OnRosterOverride(sender, fields)
+    elseif command == "GNOTES_REQ" then
+        self:OnGuildNotesRequest(sender)
+    elseif command == "GNOTES" then
+        -- fields[1] is a structured value (name -> record map), not a stringified arg: the
+        -- relay sends via comm:Send directly, bypassing SendLargeMessage's tostring pass.
+        -- fields[2] is the sender's completeness declaration (1 = map built by a completed
+        -- full borrow scan).
+        self:OnGuildNotesData(sender, fields[1], fields[2])
     end
 end

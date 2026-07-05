@@ -111,4 +111,71 @@ H.test("minimap ML-active desaturation gates on a resolved loot master", functio
     H.check(true, "UpdateMinimapMLActive ran through both states")
 end)
 
+-- UI/Minimap.lua: the roster-attention alert repurposes the owed ring (red, pulsing) and
+-- outranks the owed spin; only roster editors see it.
+H.test("minimap attention mode gates on editability and outranks owed", function()
+    local w = uiWorld()
+    w.addon:InitializeUI()
+    w.addon:BuildMinimapButton()
+    local shine = w.addon.ui.minimapShine
+    H.notNil(shine, "shine ring built")
+
+    w.addon.roster.rosterDisplay = {
+        { name = "zug", present = true, needsAttention = true, specName = "", status = "unknown", className = "warrior", source = "unconfigured" },
+    }
+    w.addon.CanEditRoster = function() return false end
+    w.addon:RefreshMinimapShine()
+    H.eq(shine.mode, nil, "non-editor never sees the attention state")
+
+    w.addon.CanEditRoster = function() return true end
+    w.addon:RefreshMinimapShine()
+    H.eq(shine.mode, "attention", "editor with an unhandled member gets attention mode")
+
+    w.addon.CountLootOwedToMe = function() return 2 end
+    w.addon:RefreshMinimapShine()
+    H.eq(shine.mode, "attention", "attention outranks owed while both apply")
+
+    w.addon.roster.rosterDisplay = {}
+    w.addon:RefreshMinimapShine()
+    H.eq(shine.mode, "owed", "owed resumes once the roster is clean")
+
+    w.addon.CountLootOwedToMe = function() return 0 end
+    w.addon:RefreshMinimapShine()
+    H.eq(shine.mode, nil, "ring idle with nothing to signal")
+end)
+
+-- UI/RaidersTab.lua: unhandled guests float to the top in every sort mode; the raid-only
+-- toggle filters absent entries.
+H.test("Raiders tab: guests sort first and raid-only filters", function()
+    local w = uiWorld()
+    w.addon:InitializeUI()
+    w.addon.roster.rosterDisplay = {
+        { name = "aaron", present = true, isGuest = false, needsAttention = false, className = "mage", specName = "fire", status = "main", source = "configured" },
+        { name = "benched", present = false, isGuest = false, needsAttention = false, className = "rogue", specName = "combat", status = "main", source = "configured" },
+        { name = "zug", present = true, isGuest = true, needsAttention = true, className = "warrior", specName = "", status = "unknown", source = "unconfigured" },
+    }
+    w.addon.db.ui.rosterSortMode = "name"
+    w.addon.db.ui.rosterRaidOnly = false
+    local sorted = w.addon:GetSortedRosterEntries()
+    H.eq(sorted[1].name, "zug", "needs-attention member floats above alphabetical sort")
+    H.eq(#sorted, 3, "no filter keeps every entry")
+
+    w.addon.db.ui.rosterRaidOnly = true
+    sorted = w.addon:GetSortedRosterEntries()
+    H.eq(#sorted, 3, "raid-only is inert outside a raid: full guild view")
+
+    -- The harness stubs GetAttendees to {} ("not in a group"); swap it locally to simulate
+    -- a raid. Promote to a framework helper if more raid-dependent tests accumulate.
+    local stubbedGetAttendees = w.addon.GetAttendees
+    w.addon.GetAttendees = function() return { { name = "aaron" }, { name = "zug" } } end
+    sorted = w.addon:GetSortedRosterEntries()
+    H.eq(#sorted, 2, "raid-only drops absent entries when actually in a raid")
+    H.eq(sorted[1].name, "zug", "needs-attention member still first")
+    w.addon.GetAttendees = stubbedGetAttendees
+
+    w.addon.db.ui.rosterRaidOnly = false
+    w.addon:RefreshRaidersTab()
+    H.check(true, "RefreshRaidersTab renders attention rows + tab alert without error")
+end)
+
 F.endSuite()

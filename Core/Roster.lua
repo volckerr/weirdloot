@@ -23,7 +23,9 @@ function addon:RefreshRoster()
             local profile = self:GetRosterProfile(name) or {}
             local className = profile.className or self:NormalizeClassName(classFileName or classLocalized or "")
             local specName = profile.specName or ""
-            local status = profile.status or "nil"
+            -- No profile anywhere (not guild, not guest layer) = an unhandled guest: status is
+            -- genuinely unknown, distinct from the deliberate bottom tier ("nil" = Alt).
+            local status = profile.status or "unknown"
 
             local attendee = {
                 index = index,
@@ -51,19 +53,42 @@ function addon:BuildRosterDisplay(attendeesByName)
     local display = {}
     local seen = {}
 
-    for _, entry in ipairs(self:GetRosterEntries()) do
-        local key = util:NormalizeKey(entry.name)
-        local attendee = attendeesByName[key]
+    -- The guild IS the roster: every guild member gets a row, showing the same merged profile
+    -- resolution uses (rank/note-derived status and spec, configured spec filling a blank
+    -- note), so what the tab shows is what the resolver would do.
+    local guildMembers = (self.guildRoster and self.guildRoster.members) or {}
+    for key, member in pairs(guildMembers) do
+        local profile = self:GetRosterProfile(member.name) or member
         display[#display + 1] = {
-            name = entry.name,
-            className = entry.className,
-            specName = entry.specName,
-            status = entry.status,
-            present = attendee ~= nil,
-            descriptor = entry.descriptor,
-            source = "configured",
+            name = member.name,
+            className = profile.className,
+            specName = profile.specName,
+            status = profile.status,
+            present = attendeesByName[key] ~= nil,
+            descriptor = util:NormalizeKey((profile.className or "") .. " " .. (profile.specName or "")),
+            source = "guild",
+            overriddenSpec = profile.overriddenSpec,
+            overriddenStatus = profile.overriddenStatus,
         }
         seen[key] = true
+    end
+
+    -- Configured entries that aren't guildies: the guest/override layer.
+    for _, entry in ipairs(self:GetRosterEntries()) do
+        local key = util:NormalizeKey(entry.name)
+        if not seen[key] then
+            local attendee = attendeesByName[key]
+            display[#display + 1] = {
+                name = entry.name,
+                className = entry.className,
+                specName = entry.specName,
+                status = entry.status,
+                present = attendee ~= nil,
+                descriptor = entry.descriptor,
+                source = "configured",
+            }
+            seen[key] = true
+        end
     end
 
     for key, attendee in pairs(attendeesByName or {}) do
@@ -78,6 +103,21 @@ function addon:BuildRosterDisplay(attendeesByName)
                 source = "unconfigured",
             }
         end
+    end
+
+    -- A guest is a present player the guild doesn't know with no spec assigned yet: the
+    -- entries leadership still has to handle. The Raiders tab floats them to the top until a
+    -- spec lands (via the add flow or a GUEST_UPSERT), at which point they sort normally.
+    for _, entry in ipairs(display) do
+        entry.isGuest = entry.present
+            and not (self.GetGuildMemberProfile and self:GetGuildMemberProfile(entry.name))
+            and (entry.specName or "") == ""
+        -- Underspecified RAID member: blank spec silently drops them out of spec-prio tiers
+        -- (exact-key matcher) and unknown status means nobody assigned them. The tab floats,
+        -- tints, and badges these until leadership fills the data (the chosen alternative to
+        -- softening the resolver).
+        entry.needsAttention = (entry.present
+            and (entry.status == "unknown" or (entry.specName or "") == "")) and true or false
     end
 
     table.sort(display, function(left, right)
@@ -209,6 +249,12 @@ function addon:RefreshLootAuthority()
     -- out-rank us). Only a false->true transition fires it, so the event/retry re-runs do not re-mint.
     if isLootMaster and not wasLootMaster then
         self:AssumeLootMasterSession()
+        -- A blind ML needs the officer-note map (spec/status tokens) for resolution; ask the
+        -- guild the moment authority lands, so a mid-raid ML swap doesn't wait for the next
+        -- session start. No-op for note-readers and non-guildies (guards in RequestGuildNotes).
+        if self.RequestGuildNotes then
+            self:RequestGuildNotes()
+        end
     end
 
     -- A raider that just learned (or changed) who the loot master is -- e.g. the raid roster finally
@@ -234,6 +280,31 @@ end
 
 function addon:IsAuthorizedLootMaster()
     return self.roster.isLootMaster
+end
+
+-- Roster-edit authority: guild leadership (officer ranks) ONLY. Deliberately narrower than
+-- loot authority -- the ML is often not an officer and asks one to fix roster data; raid
+-- leadership confers nothing here. The single source for every edit surface (Raiders tab
+-- menus, minimap attention alert) and mirrored by the comm receive gates.
+function addon:CanEditRoster()
+    return self:IsGuildLeadership(util:GetPlayerName("player"))
+end
+
+-- The raid members whose roster data still needs leadership attention, with WHAT is missing
+-- broken out (feeds the minimap tooltip and any future nag surface).
+function addon:GetRosterAttentionList()
+    local list = {}
+    for _, entry in ipairs(self:GetRosterDisplayList()) do
+        if entry.needsAttention then
+            list[#list + 1] = {
+                name = entry.name,
+                className = entry.className,
+                missingSpec = (entry.specName or "") == "",
+                unknownStatus = entry.status == "unknown",
+            }
+        end
+    end
+    return list
 end
 
 function addon:GetLootMasterName()

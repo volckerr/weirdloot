@@ -40,7 +40,7 @@ function addon:BuildRollerList(lot)
                 name = attendee and attendee.name or playerKey,
                 className = attendee and attendee.className or "",
                 specName = attendee and attendee.specName or "",
-                status = attendee and attendee.status or "nil",
+                status = attendee and attendee.status or "unknown",
                 descriptor = util:NormalizeKey(((attendee and attendee.className) or "") .. " " .. ((attendee and attendee.specName) or "")),
                 responseType = choice,
             }
