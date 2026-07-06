@@ -760,9 +760,13 @@ local function buildBanner(bannerName, medallionCfg)
         frame.RollCountChip:SetSize(16, 16)
         frame.RollCountChip:SetPoint("CENTER", frame, "TOPRIGHT", -7, -7)
         frame.RollCountChip:SetTexture("Interface\\AddOns\\WeirdLoot\\Textures\\RollCountChip")
+        frame.RollCountChip:SetAlpha(0.8)   -- on top of the art's own baked ~0.82
         frame.RollCountChip:Hide()
-        frame.RollCount = frame:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
-        frame.RollCount:SetPoint("CENTER", frame.RollCountChip, "CENTER", 0, 0)
+        -- bare antialiased digits: the stock small number font is monochrome+thick-outline (jagged
+        -- by design), and the chip's own dark ground needs no outline or shadow for contrast
+        frame.RollCount = frame:CreateFontString(nil, "OVERLAY")
+        frame.RollCount:SetFont("Fonts\\ARIALN.TTF", 12, "")
+        frame.RollCount:SetPoint("CENTER", frame.RollCountChip, "CENTER", -0.5, 0)
         frame.RollCount:SetText("")
 
         tinsert(parent.LootFrames, frame)
