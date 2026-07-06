@@ -752,6 +752,19 @@ local function buildBanner(bannerName, medallionCfg)
         IconOverlay2:SetPoint("CENTER")
         IconOverlay2:Hide()
 
+        -- roll-card roller count: a small dark rounded chip on the card's top-RIGHT corner,
+        -- mirroring the minimal badge's top-left spot, with the live count inside. The backing is a
+        -- baked flat-black rounded square (Textures/RollCountChip.blp, alpha in the art). Shown only
+        -- while someone is in (an empty chip reads as clutter); hover gives the names.
+        frame.RollCountChip = frame:CreateTexture(nil, "OVERLAY")
+        frame.RollCountChip:SetSize(16, 16)
+        frame.RollCountChip:SetPoint("CENTER", frame, "TOPRIGHT", -7, -7)
+        frame.RollCountChip:SetTexture("Interface\\AddOns\\WeirdLoot\\Textures\\RollCountChip")
+        frame.RollCountChip:Hide()
+        frame.RollCount = frame:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+        frame.RollCount:SetPoint("CENTER", frame.RollCountChip, "CENTER", 0, 0)
+        frame.RollCount:SetText("")
+
         tinsert(parent.LootFrames, frame)
         frame.__idx = #parent.LootFrames   -- stable id for diagnostics
 
@@ -1189,6 +1202,8 @@ local function buildBanner(bannerName, medallionCfg)
             frame.RollTimer:Show()
             frame.selectedBracket = nil
             frame.getRollers = data.getRollers
+            frame.RollCount:SetText("")
+            frame.RollCountChip:Hide()
             for _, btn in ipairs(frame.RollButtons) do
                 btn:SetAlpha(1)   -- a reused slot may carry a stale fade alpha from its previous life
                 btn:UnlockHighlight()
@@ -1241,6 +1256,8 @@ local function buildBanner(bannerName, medallionCfg)
         rbDbg(("add-WON idx=%s reused=%s rd=%s HIDE-buttons"):format(tostring(frame.__idx), tostring(reused), tostring(data.rollDuration)))
         frame.rollDuration = nil
         frame.getRollers = nil
+        frame.RollCount:SetText("")
+        frame.RollCountChip:Hide()
         frame.RollTimer:Hide()
         for _, btn in ipairs(frame.RollButtons) do btn:Hide() end
         frame.onMLEnd, frame.onMLCancel = nil, nil
@@ -1306,6 +1323,7 @@ local function buildBanner(bannerName, medallionCfg)
                         f:SetAlpha(1)   -- slot freed: restore base visual state for its next occupant
                         f:Hide()
                         if f.RollTimer then f.RollTimer:Hide() end
+                        if f.RollCount then f.RollCount:SetText(""); f.RollCountChip:Hide() end
                         if f.RollButtons then for _, btn in ipairs(f.RollButtons) do btn:SetAlpha(1); btn:Hide() end end
                         if f.MLButtons then for _, btn in ipairs(f.MLButtons) do btn:SetAlpha(1); btn:Hide() end end
                         removed = true
@@ -1325,6 +1343,11 @@ local function buildBanner(bannerName, medallionCfg)
                             local frac = max(f.timeLeft, 0) / f.rollDuration
                             f.RollTimer:SetValue(frac)
                             f.RollTimer:SetStatusBarColor(1 - frac, frac, 0.1)   -- green -> red
+                            if f.getRollers then
+                                local n = #f.getRollers()
+                                f.RollCount:SetText(n > 0 and n or "")
+                                if n > 0 then f.RollCountChip:Show() else f.RollCountChip:Hide() end
+                            end
                         end
                     end
                 end
