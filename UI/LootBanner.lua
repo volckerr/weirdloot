@@ -24,7 +24,7 @@ local WON_ROW_H = 44                -- win card: icon + name + winner line
 local DROP_ROW_H = 62               -- roll card is taller: name + prio line + bracket buttons
 local ROW_GAP = 2                   -- vertical gap between stacked rows
 local BB_MAX_LOOT = 8
-local BADGE_SIZE = 37               -- minimalist per-card badge (dice/bag), same size as the loot icon
+local BADGE_SIZE = 20               -- minimalist per-card badge (dice/bag), a small top-left corner emblem
 local MINIMAL_PAD = 6               -- minimalist top/bottom padding (no chrome to reserve)
 local MINIMAL_BG_BOOST = 0.4        -- minimalist-only second pass of the row art: no dark chrome behind the
                                     -- cards, so thicken the colored background slightly (alpha of the extra layer)
@@ -192,8 +192,8 @@ local function setChromeShown(banner, shown)
 end
 
 -- Anchor a roll card's ML control rail (End/Cancel) off the card's edge per the current side
--- setting, stacking the buttons top-down. The minimalist badge peeks ~12px off the card's left
--- edge, so the left-side rail backs off further there to clear it.
+-- setting, stacking the buttons top-down. The minimalist corner badge pokes ~5px off the card's
+-- left edge, so the left-side rail backs off a little further there to clear it.
 local function anchorMLButtons(frame)
     local minimal = frame:GetParent().minimal
     local prev
@@ -203,7 +203,7 @@ local function anchorMLButtons(frame)
             if prev then
                 btn:SetPoint("TOPRIGHT", prev, "BOTTOMRIGHT", 0, -3)
             else
-                btn:SetPoint("TOPRIGHT", frame, "TOPLEFT", minimal and -16 or -6, -4)
+                btn:SetPoint("TOPRIGHT", frame, "TOPLEFT", minimal and -10 or -6, -4)
             end
         else
             if prev then
@@ -654,14 +654,14 @@ local function buildBanner(bannerName, medallionCfg)
         Icon:SetPoint("LEFT", 14, 0)
         Icon:SetTexture("Interface\\Icons\\inv_misc_bag_felclothbag")
 
-        -- Minimalist per-card badge: the dice/bag medallion shrunk to a card emblem, centered on the
-        -- icon's LEFT edge so its right half tucks behind the icon and its left half peeks off the card.
-        -- 3.3.5a ignores texture SUBLEVELS, so the stack is ordered by distinct draw LAYERS instead:
-        -- quality border (BORDER) < badge (ARTWORK) < loot icon (OVERLAY). Minimalist only.
+        -- Minimalist per-card badge: the dice/bag emblem sits small in the card's top-left corner,
+        -- poking a few px past the edge. That corner is left of the icon, so no overlap; 3.3.5a
+        -- ignores texture SUBLEVELS, so layers order the stack: quality border (BORDER) < badge
+        -- (ARTWORK) < loot icon (OVERLAY). Minimalist only.
         frame.Badge = frame:CreateTexture(nil, "ARTWORK")
         local Badge = frame.Badge
         Badge:SetSize(BADGE_SIZE, BADGE_SIZE)
-        Badge:SetPoint("CENTER", Icon, "LEFT", -8, 0)   -- nudged left so more of the badge peeks out
+        Badge:SetPoint("CENTER", frame, "TOPLEFT", 7, -7)
         -- badgeTexture overrides the per-card badge only; the full-chrome medallion keeps its atlas
         local badgeTex = medallionCfg and (medallionCfg.badgeTexture or medallionCfg.texture)
         if badgeTex then
@@ -1592,7 +1592,9 @@ end
 ------------------------------------------------------------------
 -- Two banner instances stacked in one region: drops (dice) above, awarded (bag) below.
 local awardedBanner = buildBanner("WeirdLootAwardedBanner",
-    { atlas = "LootBanner-LootBagCircle", badgeTexture = "Interface\\Icons\\INV_Misc_Bag_10", badgeFlipH = true })
+    -- badge: the medallion's own pouch cluster cut free of its dark disc (Textures/LootPouches.blp,
+    -- derived from the LootBagCircle atlas region)
+    { atlas = "LootBanner-LootBagCircle", badgeTexture = "Interface\\AddOns\\WeirdLoot\\Textures\\LootPouches" })
 local dropsBanner = buildBanner("WeirdLootDropsBanner", { texture = DICE_TEXTURE })
 
 local REGION_TOP = -120
