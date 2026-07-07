@@ -204,7 +204,7 @@ function addon:PLAYER_LOGIN()
             minimapButtonAngle = 200,
             rollResultTooltipAnchor = "RIGHT",   -- where roll-popup hover tooltips dock: RIGHT/LEFT/TOP/BOTTOM/CURSOR
             explanationTooltipsEnabled = true,   -- hover tooltips that spell things out (e.g. the roll brackets, popup + loot tab)
-            bannerMinimal = false,               -- loot banner look: minimalist (per-card badge, no chrome) vs full
+            bannerMinimal = true,                -- loot banner look: minimalist (per-card badge, no chrome) vs full; minimal is the default
             bannerInstant = false,               -- loot banner animations: snappy (instant) vs smooth
             bannerMLSide = "RIGHT",              -- which card edge the ML roll controls (End/Cancel) hang off: RIGHT/LEFT
             bannerLocked = false,                -- lock the loot banner in place (drag disabled)

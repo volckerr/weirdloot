@@ -210,7 +210,7 @@ function addon:BuildOptionsTab()
 
     -- Suppress the win banner for loot you did not roll on: items you passed, or whose roll prompt
     -- your white/black list or hide-unusable filter hid. Off by default.
-    local hideUnrolledWinsCB = createOptionsCheckbox(panel, "Don't show winners for loot I passed on or filtered out")
+    local hideUnrolledWinsCB = createOptionsCheckbox(panel, "Only show winners for loot I rolled on")
     hideUnrolledWinsCB:SetPoint("TOPLEFT", hideUnusableCB, "BOTTOMLEFT", 0, -20)
     hideUnrolledWinsCB:SetChecked(opt.hideUnrolledWins and true or false)
     hideUnrolledWinsCB:SetScript("OnClick", function(selfCB)
