@@ -170,6 +170,24 @@ local function resultHoldSeconds()
     return nil
 end
 
+-- The loot master who opted to keep their own finished-loot banners open sees the manual close (X)
+-- immediately: they chose to hold the cards, so give them the control right away rather than making
+-- them wait out the examine window like a held-open card on a client with auto-hide simply off.
+local function resultCloseImmediate()
+    local opt = addon.db and addon.db.options
+    return opt and opt.forceKeepResultPopup and addon.IsAuthorizedLootMaster and addon:IsAuthorizedLootMaster()
+end
+
+-- The examine window used for the manual-close arm timer: the configured auto-hide seconds (so it
+-- rides the same value and the same extension as the visible timers), with a floor so a held-open
+-- card still has a real window to count down even when auto-hide seconds is 0 or unset.
+local function resultExamineSeconds()
+    local opt = addon.db and addon.db.options
+    local secs = (opt and tonumber(opt.resultPopupAutoCloseSeconds)) or 10
+    if secs <= 0 then secs = 10 end
+    return secs
+end
+
 local function SetItemButtonQuality(button, quality)
     if button and button.IconBorder then
         button.IconBorder:SetTexture(ICON_BORDER_TEXTURE)
@@ -851,6 +869,19 @@ local function buildBanner(bannerName, medallionCfg)
         frame.RollCount:SetPoint("CENTER", frame.RollCountChip, "CENTER", -0.5, 0)
         frame.RollCount:SetText("")
 
+        -- Manual close (X) for a WON row that is being held open past its examine window (the loot
+        -- master's never-auto-hide banners, or any client with auto-hide off). The row's own timer
+        -- arms it; clicking fades that one card. Hidden on normal auto-fading rows and roll cards.
+        frame.CloseButton = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
+        frame.CloseButton:SetScale(0.7)
+        frame.CloseButton:SetPoint("CENTER", frame, "TOPRIGHT", -5, -5)
+        frame.CloseButton:SetScript("OnClick", function()
+            frame.fading = true
+            frame.fadeLeft = parent.instant and 0 or ROW_FADE_TIME
+            frame.CloseButton:Hide()
+        end)
+        frame.CloseButton:Hide()
+
         tinsert(parent.LootFrames, frame)
         frame.__idx = #parent.LootFrames   -- stable id for diagnostics
 
@@ -1284,6 +1315,9 @@ local function buildBanner(bannerName, medallionCfg)
         frame:Show()
         if frame.Anim and not self.instant then frame.Anim:Play() end   -- instant: card just appears
         relayoutAliveRows(self)
+        frame.holdOpen = nil            -- won-row hold state; set below for a held-open won row
+        frame.closeImmediate = nil
+        frame.CloseButton:Hide()        -- only a held-open won row shows it (armed below / by the timer)
         if data.rollDuration then
             -- roll-prompt row: a countdown of the roll timer + clickable bracket buttons. The live
             -- feed passes getTimeLeft (the roll's own deadline is the clock; self-correcting and
@@ -1334,14 +1368,21 @@ local function buildBanner(bannerName, medallionCfg)
         for _, btn in ipairs(frame.RollButtons) do btn:Hide() end
         frame.onMLEnd, frame.onMLCancel = nil, nil
         for _, btn in ipairs(frame.MLButtons) do btn:Hide() end
-        -- Won row: full lifetime; each additional drop EXTENDS the (won) rows already shown by half
-        -- (capped at full), reviving any that were mid-fade, so earlier items linger to be read.
-        local full = resultHoldSeconds()
-        frame.timeLeft = full or 86400
-        if additional and full then
+        -- Won row lifetime. Every row runs the same examine countdown (the configured auto-hide
+        -- seconds), and each additional drop EXTENDS the rows already shown by half (capped at the
+        -- window), reviving any mid-fade, so earlier items linger to be read. A row whose client is
+        -- NOT auto-hiding (loot master never-auto-hide, or auto-hide off) is "held open": at zero it
+        -- does not fade -- it arms the manual close (X) instead and stays. The extension re-hides
+        -- that X, so the close only reappears once fresh loot stops pushing the window out.
+        local examine = resultExamineSeconds()
+        frame.holdOpen = (resultHoldSeconds() == nil)
+        frame.closeImmediate = frame.holdOpen and resultCloseImmediate()
+        frame.timeLeft = examine
+        if frame.closeImmediate then frame.CloseButton:Show() end   -- ML: no wait
+        if additional then
             for _, f in ipairs(self.LootFrames) do
                 if f.alive and f ~= frame and not f.rollDuration then
-                    f.timeLeft = math.min(max(f.timeLeft, 0) + full / 2, full)
+                    f.timeLeft = math.min(max(f.timeLeft, 0) + examine / 2, examine)
                     if f.fading then
                         rbDbg(("REVIVE idx=%s rd=%s (no button re-show)"):format(tostring(f.__idx), tostring(f.rollDuration)))
                         f.fading = false
@@ -1370,8 +1411,9 @@ local function buildBanner(bannerName, medallionCfg)
                 self.hoveredThisVisit = false
                 self.hoverGrace = nil
                 for _, f in ipairs(self.LootFrames) do
-                    -- only won rows collapse to a 2s exit on mouse-off
-                    if f.alive and not f.fading and not f.rollDuration then f.timeLeft = 2 end
+                    -- only auto-hiding won rows collapse to a 2s exit on mouse-off; a held-open row
+                    -- keeps its window (it is meant to stay until manually closed)
+                    if f.alive and not f.fading and not f.rollDuration and not f.holdOpen then f.timeLeft = 2 end
                 end
             end
         end
@@ -1406,6 +1448,7 @@ local function buildBanner(bannerName, medallionCfg)
                         if f.RollCount then f.RollCount:SetText(""); f.RollCountChip:Hide() end
                         if f.RollButtons then for _, btn in ipairs(f.RollButtons) do btn:SetAlpha(1); btn:Hide() end end
                         if f.MLButtons then for _, btn in ipairs(f.MLButtons) do btn:SetAlpha(1); btn:Hide() end end
+                        if f.CloseButton then f.CloseButton:Hide() end
                         removed = true
                     else
                         f:SetAlpha(f.fadeLeft / ROW_FADE_TIME)
@@ -1418,7 +1461,13 @@ local function buildBanner(bannerName, medallionCfg)
                     else
                         f.timeLeft = f.timeLeft - elapsed
                     end
-                    if f.timeLeft <= 0 then
+                    if f.timeLeft <= 0 and f.holdOpen then
+                        -- held open (never-auto-hide / auto-hide off): do not fade. Keep it alive and
+                        -- arm the manual close -- immediately for the ML, else once the fade margin
+                        -- past zero has elapsed (so it lines up with when a normal row would be gone).
+                        stillCounting = stillCounting + 1
+                        if f.closeImmediate or f.timeLeft <= -ROW_FADE_TIME then f.CloseButton:Show() end
+                    elseif f.timeLeft <= 0 then
                         rbDbg(("FADE idx=%s rd=%s"):format(tostring(f.__idx), tostring(f.rollDuration)))
                         f.fading = true
                         f.fadeLeft = self.instant and 0 or ROW_FADE_TIME   -- instant: remove next tick, no fade
@@ -1442,6 +1491,8 @@ local function buildBanner(bannerName, medallionCfg)
                                 f.RollCount:SetText(n > 0 and n or "")
                                 if n > 0 then f.RollCountChip:Show() else f.RollCountChip:Hide() end
                             end
+                        elseif f.holdOpen and not f.closeImmediate then
+                            f.CloseButton:Hide()   -- re-extended above zero by fresh loot: back in the window
                         end
                     end
                 end
@@ -1536,6 +1587,7 @@ local function buildBanner(bannerName, medallionCfg)
             if f.RollTimer then f.RollTimer:Hide() end
             if f.RollButtons then for _, btn in ipairs(f.RollButtons) do btn:SetAlpha(1); btn:Hide() end end
             if f.MLButtons then for _, btn in ipairs(f.MLButtons) do btn:SetAlpha(1); btn:Hide() end end
+            if f.CloseButton then f.CloseButton:Hide() end
             f:Hide()
         end
         banner:SetHeight(banner.baseHeight)

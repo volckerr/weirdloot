@@ -135,6 +135,18 @@ function self.makeWorld(playerName, isML)
                 -- measurement / numeric getters feed arithmetic (e.g. frame-level + offset,
                 -- math.ceil in the popup-height helpers); return a number, not the chainable frame.
                 return function() return 0 end
+            elseif k == "GetEffectiveScale" or k == "GetScale" or k == "GetAlpha"
+                or k == "GetEffectiveAlpha" then
+                -- scale/alpha getters also feed arithmetic (banner row layout, fade math); return 1.
+                return function() return 1 end
+            elseif k == "Show" then
+                return function(s) s.__shown = true; return s end
+            elseif k == "Hide" then
+                return function(s) s.__shown = false; return s end
+            elseif k == "IsShown" or k == "IsVisible" then
+                -- track real shown state so banner-row tests can assert a close button / row is
+                -- shown or hidden. Unset defaults to shown (WoW's default for a fresh frame).
+                return function(s) if s.__shown == nil then return true end return s.__shown end
             elseif k == "GetFrameStrata" then
                 return function() return "DIALOG" end
             elseif k == "GetName" then
@@ -205,6 +217,8 @@ function self.makeWorld(playerName, isML)
     env.UIParent = newFrame()
     env.WorldFrame = newFrame()
     env.GameTooltip = newFrame()
+    env.IsDressableItem = function() return false end   -- banner set-name scan: no set line in tests
+    env.SetItemButtonQuality = function() end
     env.DEFAULT_CHAT_FRAME = setmetatable({ AddMessage = function() end }, { __index = function() return function() end end })
     env.GetTime = function() return self.CLOCK end
     env.time = function() return self.CLOCK end
@@ -498,6 +512,15 @@ function self.loadUI(w)
         setfenv(chunk, w.env)
         chunk()
     end
+end
+
+-- Load the real UI/LootBanner.lua into a world so its win-row engine (addRow / updateRowLifetimes,
+-- close-button timing) can be driven and asserted directly, rather than stubbed. The banners are
+-- named frames, reachable as w.env.WeirdLootAwardedBanner / WeirdLootDropsBanner.
+function self.loadBanner(w)
+    local chunk = assert(loadfile("UI/LootBanner.lua"), "loadfile failed: UI/LootBanner.lua")
+    setfenv(chunk, w.env)
+    chunk()
 end
 
 -- ---------------------------------------------------------------------------
