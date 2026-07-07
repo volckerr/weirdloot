@@ -541,12 +541,6 @@ local function getCompactPopupHeight(f)
     return math.max(floor, 39 + nameHeight + subHeight)
 end
 
-local function getCompactResultPopupHeight(f)
-    local nameHeight = math.ceil(f.name:GetStringHeight() or 0)
-    local subHeight = math.ceil(f.sub:GetStringHeight() or 0)
-    return math.max(62, 34 + nameHeight + subHeight)
-end
-
 local function showRollCountTooltip(self, f)
     local roll = f and f.roll
     if not f or not roll then
@@ -1007,8 +1001,6 @@ local function compactPopups(self)
     layoutPopups(self)
 end
 
--- How long the result popup takes to fade out after its auto-close timer expires.
-local RESULT_FADE_SECONDS = 0.4
 
 local function closePopup(self, f)
     if not f then return end
@@ -1019,24 +1011,6 @@ local function closePopup(self, f)
     removeActive(self, f)
     self.live.pool[#self.live.pool + 1] = f
     layoutPopups(self)
-end
-
--- Fade the result popup out over RESULT_FADE_SECONDS, then close it and free its slot. Shared by
--- the auto-close timer expiry (after the countdown) and the immediate timeout == 0 close, so both
--- ease away the same way rather than snapping shut.
-local function beginResultFadeOut(self, f)
-    f.fadeElapsed = 0
-    f:SetScript("OnUpdate", function(fadeFrame, elapsed)
-        fadeFrame.fadeElapsed = fadeFrame.fadeElapsed + (elapsed or 0)
-        local a = 1 - fadeFrame.fadeElapsed / RESULT_FADE_SECONDS
-        if a <= 0 then
-            fadeFrame:SetScript("OnUpdate", nil)
-            closePopup(self, fadeFrame)     -- restores alpha to 1 on the pooled frame
-            compactPopups(self)
-        else
-            fadeFrame:SetAlpha(a)
-        end
-    end)
 end
 
 -- Late-bound method wrapper so the event handlers defined earlier (SyncPendingPopups) can
@@ -1386,11 +1360,6 @@ function addon:ShowInterestPopup(roll, slot)
     roll.popup = f
     f.mode = "interest"
     f.lotId = roll.id   -- keep both attributes consistent so the reuse lookup works either way
-    if f.resultHover then
-        f.resultHover:Hide()
-        f.resultHover:SetScript("OnEnter", nil)
-        f.resultHover:SetScript("OnLeave", nil)
-    end
 
     -- seed the local player's prior pick: a prefired loot-tab choice lives on the lot before the
     -- roll starts, so the popup opens with that bracket already highlighted (RefreshInterestPopup
@@ -1544,11 +1513,6 @@ function addon:ShowPendingPopup(lot, slot)
 
     local f = acquirePopup(self)
     f.mode = "pending"
-    if f.resultHover then
-        f.resultHover:Hide()
-        f.resultHover:SetScript("OnEnter", nil)
-        f.resultHover:SetScript("OnLeave", nil)
-    end
     f:SetScript("OnUpdate", nil)        -- no countdown until the roll actually starts
     f.timer:Hide()
     f.lotId = lotId
@@ -1600,199 +1564,6 @@ function addon:ShowPendingPopup(lot, slot)
     f:SetScript("OnLeave", nil)
 
     addActivePopup(self, f, slot)        -- reuse a given slot (e.g. when a cancelled roll returns to pending)
-    f:Show()
-    layoutPopups(self)
-end
-
--- ---------------------------------------------------------------------------
--- result popup
--- ---------------------------------------------------------------------------
--- DEAD CODE: no callers since resolved loot became a raid-wide win banner (OnWinMessage ->
--- AddLootBannerItem, unconditional). Retained pending a separate cleanup pass that can also drop the
--- helpers this is the last user of (beginResultFadeOut, getCompactResultPopupHeight, resultHover).
-function addon:ShowResultPopup(roll, winners, sections, slot)
-    if self:ShouldSuppressRollPopup(roll) then
-        return
-    end
-    local f = acquirePopup(self)
-    f.mode = "result"
-    f:SetScript("OnUpdate", nil)        -- no countdown on a result popup
-    f.timer:Hide()
-    f.icon:SetTexture(roll.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
-    f.itemLink = roll.link
-    f.name:SetText(formatRollItemLabel(roll.link, roll.name, roll.quantity))
-    self:TrackPopupItem(f, roll.itemId, roll.quantity)
-    f.count:Hide()
-    f.countHover:Hide()
-    if f.rollLines then
-        for _, line in ipairs(f.rollLines) do
-            line:Hide()
-        end
-    end
-    setPopupHeight(f, getCompactResultPopupHeight(f))
-
-    local myKey = util:NormalizeKey(util:GetPlayerName("player") or "")
-    local function displaySectionLabel(sectionLabel, member)
-        if member and member.isNamed then
-            return "LC Prio"
-        end
-        return sectionLabel or "?"
-    end
-
-    -- The core hands us `winners` as an ordered list of name strings; enrich each with its roll
-    -- and priority section from the breakdown so the popup can render the class-colored
-    -- "Winner: Name - roll - section" line.
-    local winnerList = {}
-    local winnerKeys = {}
-    for _, winnerName in ipairs(winners or {}) do
-        local winnerKey = util:NormalizeKey(winnerName)
-        winnerKeys[winnerKey] = true
-        local winnerSection, winnerRoll, winnerMember
-        for _, s in ipairs(sections or {}) do
-            for _, m in ipairs(s.members) do
-                if util:NormalizeKey(m.name) == winnerKey then
-                    winnerSection = displaySectionLabel(s.label, m)
-                    winnerRoll = m.roll
-                    winnerMember = m
-                    break
-                end
-            end
-            if winnerSection then break end
-        end
-        winnerList[#winnerList + 1] = {
-            name = winnerName,
-            roll = winnerRoll,
-            section = winnerSection,
-            isNamed = winnerMember and winnerMember.isNamed or false,
-            key = winnerKey,
-        }
-    end
-
-    local line
-    if #winnerList == 0 then
-        local namedRule = roll.name and self:GetNamedRule(roll.name)
-        if namedRule and namedRule.raw and namedRule.raw ~= "" then
-            line = "Winner: Loot Council Decision"
-        else
-            line = "Winner: No rollers."
-        end
-    else
-        local winnerParts = {}
-        for _, winner in ipairs(winnerList) do
-            local className = getPlayerClassName(self, winner.key)
-            winnerParts[#winnerParts + 1] = string.format("%s - %s - %s",
-                util:ColorPlayerName(winner.name, className),
-                tostring(winner.roll or "-"),
-                winner.section or "?")
-        end
-        local winnerLabel = #winnerParts > 1 and "Winners" or "Winner"
-        line = string.format("%s: %s", winnerLabel, table.concat(winnerParts, "; "))
-    end
-
-    -- TM consolation: if the local player rolled TM (transmog) on this item and didn't win, add a
-    -- hint to contact the winner(s). The TMer typically wants the appearance once the winner is
-    -- done with the item; surfacing the name here saves them digging into the roll breakdown.
-    if #winnerList > 0 and not winnerKeys[myKey] then
-        local rolledTm = false
-        for _, s in ipairs(sections or {}) do
-            if s.label == "TM" then
-                for _, m in ipairs(s.members) do
-                    if util:NormalizeKey(m.name) == myKey then
-                        rolledTm = true
-                        break
-                    end
-                end
-                break
-            end
-        end
-        if rolledTm then
-            local names = {}
-            for _, w in ipairs(winnerList) do
-                local className = getPlayerClassName(self, w.key)
-                names[#names + 1] = util:ColorPlayerName(w.name, className)
-            end
-            line = line .. "\nContact " .. table.concat(names, " or ") .. " to trade for your transmog"
-        end
-    end
-
-    f.sub:SetText(line)
-    setPopupHeight(f, getCompactResultPopupHeight(f))   -- recompute now that sub may be multi-line
-
-    f.bisBtn:Hide(); f.msBtn:Hide(); f.muBtn:Hide(); f.osBtn:Hide(); f.tmBtn:Hide(); f.passBtn:Hide(); f.rollBtn:Hide(); f.cancelBtn:Hide()
-    f.count:Hide()
-    f.okBtn:Show()
-    f.okBtn:ClearAllPoints()
-    f.okBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -8, -8)
-    f.okBtn:SetScript("OnClick", function() closePopup(self, f); compactPopups(self) end)
-
-    f.sections = sections
-    f.winnerKeys = winnerKeys
-    f.myKey = myKey
-    if not f.resultHover then
-        f.resultHover = CreateFrame("Frame", nil, f)
-        f.resultHover:EnableMouse(true)
-    end
-    f.resultHover:SetPoint("TOPLEFT", f.sub, "TOPLEFT", -2, 2)
-    f.resultHover:SetPoint("BOTTOMRIGHT", f.sub, "BOTTOMRIGHT", 2, -2)
-    f.resultHover:Show()
-    f.resultHover:SetScript("OnEnter", function(selfFrame)
-        anchorRollTooltip(f)
-        GameTooltip:ClearLines()
-        GameTooltip:AddLine("Rolls", 1, 0.82, 0)
-        for _, s in ipairs(f.sections or {}) do
-            if #s.members > 0 then
-                local mem = {}
-                for _, m in ipairs(s.members) do mem[#mem + 1] = m end
-                for _, m in ipairs(mem) do
-                    local key = util:NormalizeKey(m.name)
-                    local winnerType = displaySectionLabel(s.label, m)
-                    local className = getPlayerClassName(self, key)
-                    GameTooltip:AddLine(string.format("  %s - %s - %s", util:ColorPlayerName(m.name, className), tostring(m.roll or "-"), winnerType), 1, 1, 1)
-                end
-            end
-        end
-        GameTooltip:Show()
-    end)
-    f.resultHover:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    f:SetScript("OnEnter", nil)
-    f:SetScript("OnLeave", nil)
-
-    -- Auto-close governs the result popup's lifetime: only auto-hide when enabled (a 0 duration
-    -- closes it immediately on the next frame; a positive duration after that many seconds). When
-    -- disabled, the popup stays until the player clicks OK. The same bottom-bar countdown used by
-    -- the roll popup visualizes the remaining time so the player sees how long they have to look.
-    local opt = getOptions()
-    -- The ML keeps finished-loot popups open to examine the winners closely, overriding their own
-    -- auto-close. This is the loot master's own UI only; raiders always follow their personal setting.
-    local mlKeepOpen = opt.forceKeepResultPopup and self:IsAuthorizedLootMaster()
-    if opt.resultPopupAutoCloseEnabled and not mlKeepOpen then
-        local timeout = tonumber(opt.resultPopupAutoCloseSeconds) or 0
-        if timeout > 0 then
-            f.timer:Show()
-            f.timer:SetValue(1)
-            f.timer:SetStatusBarColor(0, 1, 0.1)
-            f.resultDeadline = GetTime() + timeout
-            f.resultDuration = timeout
-            f:SetScript("OnUpdate", function(selfFrame)
-                local remaining = selfFrame.resultDeadline - GetTime()
-                local frac = remaining / selfFrame.resultDuration
-                if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
-                selfFrame.timer:SetValue(frac)
-                selfFrame.timer:SetStatusBarColor(1 - frac, frac, 0.1)   -- green -> red as it drains
-                if remaining <= 0 then
-                    -- Timer is up: hide the bar and fade the popup out, then close. The countdown
-                    -- runs at full alpha so the bar stays readable until the very end.
-                    selfFrame.timer:Hide()
-                    beginResultFadeOut(self, selfFrame)
-                end
-            end)
-        else
-            -- timeout == 0: no hold and no bar, but still fade out instead of snapping shut.
-            beginResultFadeOut(self, f)
-        end
-    end
-
-    addActivePopup(self, f, slot)        -- reuse the interest popup's slot so it stays put
     f:Show()
     layoutPopups(self)
 end
