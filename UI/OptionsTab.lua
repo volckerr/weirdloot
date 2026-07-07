@@ -208,13 +208,13 @@ function addon:BuildOptionsTab()
         getOptions(addon).hideUnusableRolls = selfCB:GetChecked() and true or false
     end)
 
-    -- Suppress the win banner for items you explicitly passed on (you already opted out). Off by
-    -- default; the ML and non-passers always see winners.
-    local hidePassedWinsCB = createOptionsCheckbox(panel, "Don't show winners for items I passed on")
-    hidePassedWinsCB:SetPoint("TOPLEFT", hideUnusableCB, "BOTTOMLEFT", 0, -20)
-    hidePassedWinsCB:SetChecked(opt.hidePassedWins and true or false)
-    hidePassedWinsCB:SetScript("OnClick", function(selfCB)
-        getOptions(addon).hidePassedWins = selfCB:GetChecked() and true or false
+    -- Suppress the win banner for loot you did not roll on: items you passed, or whose roll prompt
+    -- your white/black list or hide-unusable filter hid. Off by default.
+    local hideUnrolledWinsCB = createOptionsCheckbox(panel, "Don't show winners for loot I passed on or filtered out")
+    hideUnrolledWinsCB:SetPoint("TOPLEFT", hideUnusableCB, "BOTTOMLEFT", 0, -20)
+    hideUnrolledWinsCB:SetChecked(opt.hideUnrolledWins and true or false)
+    hideUnrolledWinsCB:SetScript("OnClick", function(selfCB)
+        getOptions(addon).hideUnrolledWins = selfCB:GetChecked() and true or false
     end)
 
     -- Whitelist
@@ -346,7 +346,7 @@ function addon:BuildOptionsTab()
     --   autoCloseCB
     --   explanationTipsCB
     --   hideUnusableCB             (Hide rolls my class can't use)
-    --   hidePassedWinsCB           (Don't show winners for items I passed on)
+    --   hideUnrolledWinsCB         (Don't show winners for loot I passed on or filtered out)
     --   anchorLabel + anchorDrop   (Roll result tooltip docking)
     --   minimapCB
     --   whitelistCB ... whitelistBox
@@ -362,11 +362,11 @@ function addon:BuildOptionsTab()
     hideUnusableCB:ClearAllPoints()
     hideUnusableCB:SetPoint("TOPLEFT", explanationTipsCB, "BOTTOMLEFT", 0, -20)
 
-    hidePassedWinsCB:ClearAllPoints()
-    hidePassedWinsCB:SetPoint("TOPLEFT", hideUnusableCB, "BOTTOMLEFT", 0, -20)
+    hideUnrolledWinsCB:ClearAllPoints()
+    hideUnrolledWinsCB:SetPoint("TOPLEFT", hideUnusableCB, "BOTTOMLEFT", 0, -20)
 
     anchorLabel:ClearAllPoints()
-    anchorLabel:SetPoint("TOPLEFT", hidePassedWinsCB, "BOTTOMLEFT", 0, -22)
+    anchorLabel:SetPoint("TOPLEFT", hideUnrolledWinsCB, "BOTTOMLEFT", 0, -22)
 
     minimapCB:ClearAllPoints()
     minimapCB:SetPoint("TOPLEFT", anchorLabel, "BOTTOMLEFT", 0, -22)

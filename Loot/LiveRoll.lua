@@ -1260,7 +1260,7 @@ function addon:ShowRollBannerCard(roll)
 
     local mine = self:GetPlayerResponse(roll.id, playerName)
     roll.choice = mine
-    roll.passed = (mine == "pass")   -- see ShowInterestPopup: default Pass counts for hidePassedWins
+    roll.passed = (mine == "pass")   -- see ShowInterestPopup: default Pass counts for hideUnrolledWins
 
     -- Callbacks resolve the CURRENT roll object by id at click time, not the one captured now: a
     -- restore and the DROP can both build a roll for the same lot (sync delta lands first), and the
@@ -1367,7 +1367,7 @@ function addon:ShowInterestPopup(roll, slot)
     -- re-asserts it below from roll.choice).
     local mine = self:GetPlayerResponse(roll.id, util:GetPlayerName("player"))
     roll.choice = mine   -- includes "pass": a prior pass opens with the Pass button highlighted
-    -- Seed the Pass stance from the durable response (default is "pass"), so hidePassedWins treats
+    -- Seed the Pass stance from the durable response (default is "pass"), so hideUnrolledWins treats
     -- anything left on the default Pass as passed. Derived from stored state so it survives a
     -- rebuild (duplicate DROP), a relog, or a prefire; a live bracket click updates it (ChooseInterest).
     roll.passed = (mine == "pass")
@@ -1484,7 +1484,7 @@ function addon:ChooseInterest(roll, tier)
         self:Print("Your class cannot use that token. You may only pass.")
         return
     end
-    -- Track the local player's Pass stance for the hidePassedWins option: set on a pass, cleared by
+    -- Track the local player's Pass stance for the hideUnrolledWins option: set on a pass, cleared by
     -- any real bracket. Not cleared by the two-click dismiss below, so it survives to OnWinMessage.
     roll.passed = (tier == "pass")
     self:SendInterest(roll.id, tier)
@@ -1987,10 +1987,12 @@ function addon:OnWinMessage(fields)
     -- whether they still had the interest popup open or already dismissed it. Close any lingering
     -- roll surface first (popup or banner card) so it does not sit behind the win.
     self:CloseInterestPopup(roll)
-    -- Opt-out: with hidePassedWins on, a raider only sees win banners for loot they actually rolled
-    -- on; anything left on the default Pass (or explicitly passed) is suppressed as noise. Off by
-    -- default; the ML always sees results (its own resolve path is ungated).
-    local suppressed = getOptions().hidePassedWins and roll.passed
+    -- Opt-out: with hideUnrolledWins on, a raider only sees win banners for loot they actually rolled
+    -- on. That means suppressing the result when they passed (roll.passed, default Pass included) OR
+    -- when their own filters would have hidden the roll prompt in the first place (white/black list,
+    -- hide-unusable) -- evaluated live so a filtered item is caught even if no roll surface opened.
+    -- Off by default; the ML always sees results (its own resolve path is ungated).
+    local suppressed = getOptions().hideUnrolledWins and (roll.passed or self:ShouldSuppressRollPopup(roll))
     if #winners > 0 and not suppressed then
         local sections = self:DecodeSections(sectionsText)
         self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))

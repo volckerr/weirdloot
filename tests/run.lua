@@ -1102,8 +1102,8 @@ test("two-click dismiss: the ML's own popup never closes on a repeat click", fun
 end)
 
 -- The win banner shows raid-wide by default: a passer learns the winner via the banner even after
--- dismissing their popup, unless they opt into hidePassedWins (tested below).
-test("a passing raider still gets the win banner by default (hidePassedWins off)", function()
+-- dismissing their popup, unless they opt into hideUnrolledWins (tested below).
+test("a passing raider still gets the win banner by default (hideUnrolledWins off)", function()
     local ml, raider, lot = rollWithRaider(40005)
     local roll = rollFor(raider, lot.id)
     raider.addon:ChooseInterest(roll, "pass")
@@ -1117,9 +1117,9 @@ test("a passing raider still gets the win banner by default (hidePassedWins off)
     eq(#raider.addon._bannerItems, 1, "the win banner shows for a passer with the option off")
 end)
 
-test("hidePassedWins on: a passer's win banner is suppressed", function()
+test("hideUnrolledWins on: a passer's win banner is suppressed", function()
     local ml, raider, lot = rollWithRaider(40006)
-    raider.addon.db.options.hidePassedWins = true
+    raider.addon.db.options.hideUnrolledWins = true
     local roll = rollFor(raider, lot.id)
     raider.addon:ChooseInterest(roll, "pass")
     check(roll.passed, "the roll records the local pass")
@@ -1128,9 +1128,9 @@ test("hidePassedWins on: a passer's win banner is suppressed", function()
     eq(#raider.addon._bannerItems, 0, "the passer sees no win banner with the option on")
 end)
 
-test("hidePassedWins on: a non-passer still sees the win banner", function()
+test("hideUnrolledWins on: a non-passer still sees the win banner", function()
     local ml, raider, lot = rollWithRaider(40006)
-    raider.addon.db.options.hidePassedWins = true
+    raider.addon.db.options.hideUnrolledWins = true
     raider.addon.IsPlayerAllowedForItem = function() return true end
     local roll = rollFor(raider, lot.id)
     raider.addon:ChooseInterest(roll, "ms")             -- rolled, did not pass
@@ -1140,14 +1140,26 @@ test("hidePassedWins on: a non-passer still sees the win banner", function()
     eq(#raider.addon._bannerItems, 1, "the option only suppresses items you actually passed on")
 end)
 
-test("hidePassedWins on: leaving the default Pass (no action) is suppressed too", function()
+test("hideUnrolledWins on: leaving the default Pass (no action) is suppressed too", function()
     local ml, raider, lot = rollWithRaider(40006)
-    raider.addon.db.options.hidePassedWins = true
+    raider.addon.db.options.hideUnrolledWins = true
     local roll = rollFor(raider, lot.id)
     check(roll.passed, "the roll seeds passed=true from the default Pass response (no action taken)")
     ml.addon:SetPlayerResponse(lot.id, "Alice", "ms")   -- Alice wins
     ml.addon:ResolveLiveRoll(lot.id); flushWireTo(raider)
     eq(#raider.addon._bannerItems, 0, "you only see banners for loot you actually rolled on")
+end)
+
+test("hideUnrolledWins on: a filtered-out (blacklisted) item's win is suppressed even if not passed", function()
+    local ml, raider, lot = rollWithRaider(40005)   -- "Blade of Test"
+    raider.addon.db.options.hideUnrolledWins = true
+    raider.addon.db.options.blacklistEnabled = true
+    raider.addon:SetItemFilterText("blacklist", "Blade of Test")
+    local roll = rollFor(raider, lot.id)
+    roll.passed = false   -- isolate the filter path: prove the blacklist alone suppresses the win
+    ml.addon:SetPlayerResponse(lot.id, "Alice", "ms")   -- Alice wins
+    ml.addon:ResolveLiveRoll(lot.id); flushWireTo(raider)
+    eq(#raider.addon._bannerItems, 0, "a filtered item's win is hidden regardless of pass state")
 end)
 
 -- ---------------------------------------------------------------------------
@@ -1213,7 +1225,7 @@ test("banner mode: card pass records the pass and a dismiss clears the choice", 
     local card = cardFor(raider, lot.id)
     card.onPick("Pass")
     local roll = rollFor(raider, lot.id)
-    check(roll.passed, "the pass is recorded for hidePassedWins")
+    check(roll.passed, "the pass is recorded for hideUnrolledWins")
     card.onChosen("Pass")   -- repeat click: the card dismissed itself
     eq(roll.choice, nil, "a pass dismiss clears the choice (it carries no interest)")
 end)
