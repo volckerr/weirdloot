@@ -284,10 +284,16 @@ end
 function addon:RestoreRollPopup(lot)
     local name, link, icon = util:ItemRender(lot.itemId)
     local remaining = (self._rollRemaining and self._rollRemaining[lot.id]) or getRollDuration()
+    -- The ML's broadcast prio is not persisted on the synced lot, so a restore (relog, or the
+    -- ROLLING delta racing ahead of the DROP) has no authoritative prio. Fall back to this client's
+    -- own listed priority rather than "" -- an empty prio would wrongly gate BiS as "no priority".
+    -- If the DROP then lands (the race), ShowRollBannerCard's dedupe re-assert corrects it to the
+    -- ML's exact prio + availability.
+    local prio = (name and self:GetLiveItemPrio({ name = name })) or ""
     local roll = {
         id = lot.id, itemId = lot.itemId, link = link,
         name = name or link or ("item:" .. tostring(lot.itemId)),
-        icon = icon, prio = "", owner = false, registrants = {}, resolved = false,
+        icon = icon, prio = prio, owner = false, registrants = {}, resolved = false,
         quantity = lot.count or 1,
         duration = getRollDuration(),
         deadline = GetTime() + remaining,
@@ -1320,13 +1326,10 @@ function addon:ShowRollBannerCard(roll)
             if tier then self:ChooseInterest(liveRoll(), tier) end
         end,
         onChosen = function(label)
-            -- the card dismissed itself (repeat click): mirror the popup's dismiss bookkeeping;
-            -- a real bracket keeps the interest already sent, Pass carries none so it clears
+            -- the card dismissed itself (repeat click): a real bracket keeps the interest already
+            -- sent; Pass carries none, so dismissing it clears the local choice
             local r = liveRoll()
-            if not r.owner then
-                if CARD_TIERS[label] == "pass" then r.choice = nil end
-                r.dismissed = true
-            end
+            if not r.owner and CARD_TIERS[label] == "pass" then r.choice = nil end
         end,
     }
     if roll.owner then
@@ -1507,6 +1510,9 @@ function addon:ChooseInterest(roll, tier)
         self:Print("Your class cannot use that token. You may only pass.")
         return
     end
+    -- Track the local player's Pass stance for the hidePassedWins option: set on a pass, cleared by
+    -- any real bracket. Not cleared by the two-click dismiss below, so it survives to OnWinMessage.
+    roll.passed = (tier == "pass")
     self:SendInterest(roll.id, tier)
 
     -- Two-click dismiss, any bracket: the first click selects and highlights a bracket; a SECOND click
@@ -1516,7 +1522,6 @@ function addon:ChooseInterest(roll, tier)
     -- auto-hides: for the owner a repeat click just re-asserts the selection (no-op), it drives the roll.
     if not roll.owner and roll.choice == tier then
         if tier == "pass" then roll.choice = nil end
-        roll.dismissed = true   -- item-22: a resolve can reopen a result popup if showResultAfterHide is set
         self:CloseInterestPopup(roll)
         compactPopups(self)
         return
@@ -1602,6 +1607,9 @@ end
 -- ---------------------------------------------------------------------------
 -- result popup
 -- ---------------------------------------------------------------------------
+-- DEAD CODE: no callers since resolved loot became a raid-wide win banner (OnWinMessage ->
+-- AddLootBannerItem, unconditional). Retained pending a separate cleanup pass that can also drop the
+-- helpers this is the last user of (beginResultFadeOut, getCompactResultPopupHeight, resultHover).
 function addon:ShowResultPopup(roll, winners, sections, slot)
     if self:ShouldSuppressRollPopup(roll) then
         return
@@ -2152,6 +2160,14 @@ function addon:OnDropMessage(fields)
     if lot and (lot.removed or coreState == core.STATE.RESOLVED) then
         return
     end
+    -- We already awarded this lot but the core mirror still lags in ROLLING (its RESOLVED delta
+    -- trails the WIN): a retransmitted/late DROP would otherwise rebuild a fresh unresolved roll and
+    -- resurrect a zombie card for an item already won. OnWinMessage keeps the resolved roll on
+    -- purpose so this guard can see it.
+    local existing = self.live.rolls[lotId]
+    if existing and existing.resolved then
+        return
+    end
 
     local name, link, icon = util:ItemRender(itemId)
     local roll = {
@@ -2195,7 +2211,10 @@ function addon:OnWinMessage(fields)
     -- whether they still had the interest popup open or already dismissed it. Close any lingering
     -- roll surface first (popup or banner card) so it does not sit behind the win.
     self:CloseInterestPopup(roll)
-    if #winners > 0 then
+    -- Opt-out: a raider who explicitly passed can suppress the win banner for that item (they already
+    -- declined it, so the result is noise). Off by default; the ML and non-passers always see it.
+    local suppressed = getOptions().hidePassedWins and roll.passed
+    if #winners > 0 and not suppressed then
         local sections = self:DecodeSections(sectionsText)
         self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))
     end

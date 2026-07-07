@@ -1078,7 +1078,6 @@ test("two-click dismiss: a second click on the selected bracket hides a raider's
 
     raider.addon:ChooseInterest(roll, "ms")             -- second click on the same bracket dismisses
     check(not roll.popup, "second click on the selected bracket closes the popup")
-    check(roll.dismissed, "the roll is marked dismissed")
     eq(roll.choice, "ms", "a real bracket keeps its interest when dismissed (only Pass clears)")
 end)
 
@@ -1090,7 +1089,6 @@ test("two-click dismiss: switching to a different bracket does not close the pop
     raider.addon:ChooseInterest(roll, "os")             -- switch to OS (different bracket)
     check(roll.popup, "switching brackets keeps the popup open")
     eq(roll.choice, "os", "selection moved to OS")
-    check(not roll.dismissed, "switching does not dismiss")
 end)
 
 test("two-click dismiss: the ML's own popup never closes on a repeat click", function()
@@ -1101,36 +1099,45 @@ test("two-click dismiss: the ML's own popup never closes on a repeat click", fun
     ml.addon:ChooseInterest(mlRoll, "ms")
     ml.addon:ChooseInterest(mlRoll, "ms")
     check(mlRoll.popup, "ML popup stays open: it drives the roll")
-    check(not mlRoll.dismissed, "the ML roll is never marked dismissed")
 end)
 
--- The win banner shows raid-wide: a dismisser learns the winner via the banner regardless of the old
--- showResultAfterHide option (which gated the now-removed result popup, and no longer applies).
-test("a dismissed raider still gets the win banner (raid-wide), option off", function()
+-- The win banner shows raid-wide by default: a passer learns the winner via the banner even after
+-- dismissing their popup, unless they opt into hidePassedWins (tested below).
+test("a passing raider still gets the win banner by default (hidePassedWins off)", function()
     local ml, raider, lot = rollWithRaider(40005)
     local roll = rollFor(raider, lot.id)
     raider.addon:ChooseInterest(roll, "pass")
     raider.addon:ChooseInterest(roll, "pass")           -- two-click dismiss
-    check(not roll.popup and roll.dismissed, "raider dismissed the popup")
+    check(not roll.popup, "raider dismissed the popup")
     ml.addon:SetPlayerResponse(lot.id, "Alice", "ms")   -- another roller wins, so there is a banner
     ml.addon:ResolveLiveRoll(lot.id); flushWireTo(raider)
     local hasResult = false
     for _, f in ipairs(raider.addon.live.active) do if f.mode == "result" then hasResult = true end end
     check(not hasResult, "no result popup is created (the banner replaced it)")
-    eq(#raider.addon._bannerItems, 1, "the win banner shows raid-wide even for a dismisser")
+    eq(#raider.addon._bannerItems, 1, "the win banner shows for a passer with the option off")
 end)
 
-test("showResultAfterHide no longer gates the win banner (shows with the option on too)", function()
+test("hidePassedWins on: a passer's win banner is suppressed", function()
     local ml, raider, lot = rollWithRaider(40006)
-    raider.addon.db.options = raider.addon.db.options or {}
-    raider.addon.db.options.showResultAfterHide = true
+    raider.addon.db.options.hidePassedWins = true
     local roll = rollFor(raider, lot.id)
     raider.addon:ChooseInterest(roll, "pass")
-    raider.addon:ChooseInterest(roll, "pass")           -- two-click dismiss
-    check(not roll.popup and roll.dismissed, "raider dismissed the popup")
-    ml.addon:SetPlayerResponse(lot.id, "Alice", "ms")   -- another roller wins, so there is a banner
+    check(roll.passed, "the roll records the local pass")
+    ml.addon:SetPlayerResponse(lot.id, "Alice", "ms")   -- Alice wins
     ml.addon:ResolveLiveRoll(lot.id); flushWireTo(raider)
-    eq(#raider.addon._bannerItems, 1, "banner shows for the dismisser with the option on too")
+    eq(#raider.addon._bannerItems, 0, "the passer sees no win banner with the option on")
+end)
+
+test("hidePassedWins on: a non-passer still sees the win banner", function()
+    local ml, raider, lot = rollWithRaider(40006)
+    raider.addon.db.options.hidePassedWins = true
+    raider.addon.IsPlayerAllowedForItem = function() return true end
+    local roll = rollFor(raider, lot.id)
+    raider.addon:ChooseInterest(roll, "ms")             -- rolled, did not pass
+    check(not roll.passed, "a real bracket clears the pass flag")
+    ml.addon:SetPlayerResponse(lot.id, "Alice", "bis")  -- Alice wins over the raider's MS
+    ml.addon:ResolveLiveRoll(lot.id); flushWireTo(raider)
+    eq(#raider.addon._bannerItems, 1, "the option only suppresses items you actually passed on")
 end)
 
 -- ---------------------------------------------------------------------------
@@ -1191,13 +1198,13 @@ test("banner mode: a card pick routes through ChooseInterest to the ML", functio
     check(synced and synced.key == lot.id and synced.bracket == "MS", "the card highlight was synced back")
 end)
 
-test("banner mode: card dismiss mirrors the popup's bookkeeping", function()
+test("banner mode: card pass records the pass and a dismiss clears the choice", function()
     local ml, raider, lot = bannerRollWithRaider(40005)
     local card = cardFor(raider, lot.id)
     card.onPick("Pass")
-    card.onChosen("Pass")   -- repeat click: the card dismissed itself
     local roll = rollFor(raider, lot.id)
-    check(roll.dismissed, "dismiss recorded")
+    check(roll.passed, "the pass is recorded for hidePassedWins")
+    card.onChosen("Pass")   -- repeat click: the card dismissed itself
     eq(roll.choice, nil, "a pass dismiss clears the choice (it carries no interest)")
 end)
 

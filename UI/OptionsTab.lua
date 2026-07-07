@@ -30,7 +30,7 @@ function addon:BuildOptionsTab()
     local panel = CreateFrame("Frame", nil, scroll)
     elevateInteractiveFrame(panel, scroll, 1)
     panel:SetWidth(920)
-    panel:SetHeight(1096)   -- includes the Loot Banner display section (header + 4 rows) before whitelist
+    panel:SetHeight(1130)   -- includes the Loot Banner display section (header + 4 rows) before whitelist
     scroll:SetScrollChild(panel)
     scroll:EnableMouseWheel(true)
     scroll:SetScript("OnMouseWheel", function(selfFrame, delta)
@@ -208,18 +208,18 @@ function addon:BuildOptionsTab()
         getOptions(addon).hideUnusableRolls = selfCB:GetChecked() and true or false
     end)
 
-    -- Still show the winner after you dismiss a roll popup (pass or two-click bracket dismiss). Off by
-    -- default; on, a result popup reopens on resolve so you learn who won even after hiding the loot.
-    local showResultAfterHideCB = createOptionsCheckbox(panel, "Show the final winners for loot popups you closed early")
-    showResultAfterHideCB:SetPoint("TOPLEFT", hideUnusableCB, "BOTTOMLEFT", 0, -20)
-    showResultAfterHideCB:SetChecked(opt.showResultAfterHide and true or false)
-    showResultAfterHideCB:SetScript("OnClick", function(selfCB)
-        getOptions(addon).showResultAfterHide = selfCB:GetChecked() and true or false
+    -- Suppress the win banner for items you explicitly passed on (you already opted out). Off by
+    -- default; the ML and non-passers always see winners.
+    local hidePassedWinsCB = createOptionsCheckbox(panel, "Don't show winners for items I passed on")
+    hidePassedWinsCB:SetPoint("TOPLEFT", hideUnusableCB, "BOTTOMLEFT", 0, -20)
+    hidePassedWinsCB:SetChecked(opt.hidePassedWins and true or false)
+    hidePassedWinsCB:SetScript("OnClick", function(selfCB)
+        getOptions(addon).hidePassedWins = selfCB:GetChecked() and true or false
     end)
 
     -- Whitelist
     local whitelistCB = createOptionsCheckbox(panel, "Enable White List |cffff3030(Warning: You will ONLY see loot popups for items on this list)|r")
-    whitelistCB:SetPoint("TOPLEFT", showResultAfterHideCB, "BOTTOMLEFT", 0, -24)
+    whitelistCB:SetPoint("TOPLEFT", hideUnusableCB, "BOTTOMLEFT", 0, -24)   -- overridden in the final layout pass
     whitelistCB:SetChecked(opt.whitelistEnabled and true or false)
     -- OnClick is wired below via bindExclusiveCheckboxes, once blacklistCB also exists (mutually exclusive).
 
@@ -346,7 +346,7 @@ function addon:BuildOptionsTab()
     --   autoCloseCB
     --   explanationTipsCB
     --   hideUnusableCB             (Hide rolls my class can't use)
-    --   showResultAfterHideCB      (Still show the final roll after hiding)
+    --   hidePassedWinsCB           (Don't show winners for items I passed on)
     --   anchorLabel + anchorDrop   (Roll result tooltip docking)
     --   minimapCB
     --   whitelistCB ... whitelistBox
@@ -362,11 +362,11 @@ function addon:BuildOptionsTab()
     hideUnusableCB:ClearAllPoints()
     hideUnusableCB:SetPoint("TOPLEFT", explanationTipsCB, "BOTTOMLEFT", 0, -20)
 
-    showResultAfterHideCB:ClearAllPoints()
-    showResultAfterHideCB:SetPoint("TOPLEFT", hideUnusableCB, "BOTTOMLEFT", 0, -20)
+    hidePassedWinsCB:ClearAllPoints()
+    hidePassedWinsCB:SetPoint("TOPLEFT", hideUnusableCB, "BOTTOMLEFT", 0, -20)
 
     anchorLabel:ClearAllPoints()
-    anchorLabel:SetPoint("TOPLEFT", showResultAfterHideCB, "BOTTOMLEFT", 0, -22)
+    anchorLabel:SetPoint("TOPLEFT", hidePassedWinsCB, "BOTTOMLEFT", 0, -22)
 
     minimapCB:ClearAllPoints()
     minimapCB:SetPoint("TOPLEFT", anchorLabel, "BOTTOMLEFT", 0, -22)

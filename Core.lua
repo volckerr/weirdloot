@@ -191,9 +191,8 @@ function addon:PLAYER_LOGIN()
                                     -- moves straight to SKIPPED (auto-resurfaces on the next scan).
             hideUnusableRolls = false,   -- raider opt-in: hide roll popups for items your CLASS can't use
                                          -- (armor/weapon proficiency only; unique-owned/quest-done still show)
-            showResultAfterHide = false, -- raider opt-in: after you dismiss a roll popup (pass or the
-                                         -- two-click bracket dismiss), reopen a result popup on resolve
-                                         -- so you still see who won. Off by default (some want silence).
+            hidePassedWins = false,      -- raider opt-in: suppress the win banner for items you explicitly
+                                         -- passed on (you already opted out, so skip the result). Off by default.
             whitelistEnabled = false,
             whitelistText = "",
             blacklistEnabled = false,

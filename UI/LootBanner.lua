@@ -233,6 +233,54 @@ local function rollPrioText(prio)
     return "|cffffffffPrio:|r " .. ((prio and prio ~= "") and prio or addon.DEFAULT_PRIO)
 end
 
+-- Apply a roll card's bracket-button availability (data.disabled: label -> reason string / true =
+-- gray + hover reason) and its preselected bracket (data.selected). Shared by the initial row build
+-- and the dedupe re-assert, so a restore-raced card recomputes its availability from the real prio
+-- the moment the authoritative DROP lands (else a card built from an empty restore prio would keep
+-- BiS wrongly disabled forever). Idempotent: safe to re-run on a live card.
+local function applyRollButtons(frame, data)
+    for _, btn in ipairs(frame.RollButtons) do
+        btn:SetAlpha(1)   -- a reused slot may carry a stale fade alpha from its previous life
+        btn:UnlockHighlight()
+        -- explicit text color per state (deterministic, independent of Disable()'s font handling):
+        -- gray for restricted brackets (mirrors the roll popup's styleButtonText), gold otherwise.
+        local why = data.disabled and data.disabled[btn.bracket]
+        if why then
+            btn:Disable()
+            btn:GetFontString():SetTextColor(0.5, 0.5, 0.5)
+            btn:SetMotionScriptsWhileDisabled(true)   -- a disabled button still sees the mouse
+            if type(why) == "string" then
+                btn:SetScript("OnEnter", function(b)
+                    GameTooltip:SetOwner(b, "ANCHOR_RIGHT")
+                    GameTooltip:SetText(why, 1, 0.3, 0.3, true)
+                    GameTooltip:Show()
+                end)
+                btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            else
+                btn:SetScript("OnEnter", nil)
+                btn:SetScript("OnLeave", nil)
+            end
+        else
+            btn:Enable()
+            btn:GetFontString():SetTextColor(1, 0.82, 0)
+            btn:SetScript("OnEnter", nil)   -- a reused slot may carry a stale disabled tooltip
+            btn:SetScript("OnLeave", nil)
+        end
+        btn:Show()
+    end
+    -- prior/authoritative pick: open with that bracket selected (never a disabled one)
+    frame.selectedBracket = nil
+    if data.selected then
+        for _, btn in ipairs(frame.RollButtons) do
+            if btn.bracket == data.selected and btn:GetButtonState() ~= "DISABLED" then
+                btn:LockHighlight()
+                btn:GetFontString():SetTextColor(0, 1, 0)
+                frame.selectedBracket = data.selected
+            end
+        end
+    end
+end
+
 local itemScanTooltip   -- single shared hidden scanning tooltip
 
 -- Everything about a row that derives from the ITEM (name, rarity tints, icon, set line). Split
@@ -1251,53 +1299,10 @@ local function buildBanner(bannerName, medallionCfg)
             frame.RollTimer:SetValue(max(frame.timeLeft, 0) / data.rollDuration)
             frame.RollTimer:SetStatusBarColor(0, 1, 0.1)
             frame.RollTimer:Show()
-            frame.selectedBracket = nil
             frame.getRollers = data.getRollers
             frame.RollCount:SetText("")
             frame.RollCountChip:Hide()
-            for _, btn in ipairs(frame.RollButtons) do
-                btn:SetAlpha(1)   -- a reused slot may carry a stale fade alpha from its previous life
-                btn:UnlockHighlight()
-                -- Set the text color explicitly for the button's state so the look is deterministic and
-                -- doesn't depend on Disable()'s font handling: gray for restricted brackets (mirrors the
-                -- roll popup's styleButtonText), gold otherwise.
-                local why = data.disabled and data.disabled[btn.bracket]
-                if why then
-                    btn:Disable()
-                    btn:GetFontString():SetTextColor(0.5, 0.5, 0.5)
-                    -- a string value carries the reason; explain the dead button on hover like the
-                    -- roll popup does (motion scripts let a disabled button still see the mouse)
-                    btn:SetMotionScriptsWhileDisabled(true)
-                    if type(why) == "string" then
-                        btn:SetScript("OnEnter", function(b)
-                            GameTooltip:SetOwner(b, "ANCHOR_RIGHT")
-                            GameTooltip:SetText(why, 1, 0.3, 0.3, true)
-                            GameTooltip:Show()
-                        end)
-                        btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-                    else
-                        btn:SetScript("OnEnter", nil)
-                        btn:SetScript("OnLeave", nil)
-                    end
-                else
-                    btn:Enable()
-                    btn:GetFontString():SetTextColor(1, 0.82, 0)
-                    btn:SetScript("OnEnter", nil)   -- a reused slot may carry a stale disabled tooltip
-                    btn:SetScript("OnLeave", nil)
-                end
-                btn:Show()
-            end
-            -- prior pick (prefired loot-tab choice or a restored mid-roll card): open with that
-            -- bracket already selected, exactly like the popup does
-            if data.selected then
-                for _, btn in ipairs(frame.RollButtons) do
-                    if btn.bracket == data.selected and btn:GetButtonState() ~= "DISABLED" then
-                        btn:LockHighlight()
-                        btn:GetFontString():SetTextColor(0, 1, 0)
-                        frame.selectedBracket = data.selected
-                    end
-                end
-            end
+            applyRollButtons(frame, data)   -- bracket availability + preselected pick
             -- ML rail: only a card given ML callbacks shows the controls (the real feed passes
             -- them only to the authorized loot master). Anchored per the current side each show.
             frame.onMLEnd = data.onMLEnd
@@ -1407,7 +1412,9 @@ local function buildBanner(bannerName, medallionCfg)
                     end
                 else
                     if f.getTimeLeft then
-                        f.timeLeft = f.getTimeLeft()   -- live feed: the roll's own deadline is the clock
+                        -- live feed: the roll's own deadline is the clock. Guard nil (a thunk whose
+                        -- roll vanished) so a stray return can't crash the per-frame tick.
+                        f.timeLeft = f.getTimeLeft() or 0
                     else
                         f.timeLeft = f.timeLeft - elapsed
                     end
@@ -1430,7 +1437,8 @@ local function buildBanner(bannerName, medallionCfg)
                             f.RollTimer:SetValue(frac)
                             f.RollTimer:SetStatusBarColor(1 - frac, frac, 0.1)   -- green -> red
                             if f.getRollers then
-                                local n = #f.getRollers()
+                                local rollers = f.getRollers()
+                                local n = rollers and #rollers or 0   -- guard a nil return
                                 f.RollCount:SetText(n > 0 and n or "")
                                 if n > 0 then f.RollCountChip:Show() else f.RollCountChip:Hide() end
                             end
@@ -1636,8 +1644,16 @@ local function buildBanner(bannerName, medallionCfg)
                         if f.alive and not f.fading and f.rowKey == item.key and f.rollDuration then
                             f.rollDuration = item.rollDuration   -- bar denominator
                             f.PlayerName:SetText(rollPrioText(item.prio))
+                            -- recompute bracket availability from the authoritative feed: a card first
+                            -- shown from a restore's guessed (empty) prio had BiS wrongly gated; the DROP
+                            -- carries the real prio, so re-apply the disabled map + preselected pick here
+                            applyRollButtons(f, item)
                             -- timing needs no re-assert: getTimeLeft reads the current roll's
                             -- deadline, which the newer feed already corrected
+                            if not f.getTimeLeft then   -- plain-decrement path: keep the bar consistent
+                                f.timeLeft = item.rollRemaining or item.rollDuration
+                                f.RollTimer:SetValue(max(f.timeLeft, 0) / item.rollDuration)
+                            end
                         end
                     end
                 end
