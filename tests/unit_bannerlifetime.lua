@@ -151,6 +151,33 @@ test("no-winner card: shows a reroll button that fires its callback and dismisse
     check(not row.alive, "the card dismissed itself after reroll")
 end)
 
+test("reused slot resets the won-card button alpha (stale-fade translucency guard)", function()
+    -- A pooled slot whose previous life faded leaves its close/reroll button at a partial alpha.
+    -- Every other button gets a SetAlpha(1) on reuse; these two must too, or they render translucent.
+    local w = bannerWorld(true, function(opt)
+        opt.forceKeepResultPopup = true
+        opt.resultPopupAutoCloseEnabled = true
+        opt.resultPopupAutoCloseSeconds = 10
+    end)
+    local row = showWonRow(w)
+    check(row.CloseButton:IsShown(), "the ML win card shows its close button")
+    -- simulate the stale fade alpha a prior occupant of this slot would leave behind
+    row.CloseButton:SetAlpha(0.25)
+    row.RerollButton:SetAlpha(0.25)
+    -- dismiss it so the slot goes dead and is first in line for reuse
+    row.CloseButton:GetScript("OnClick")(row.CloseButton)
+    pumpN(w, 0.05, 3)
+    check(not row.alive, "the slot was freed")
+    check(row.CloseButton.__alpha < 1, "sanity: the freed slot still carries the stale button alpha")
+    -- a fresh win reuses that dead slot
+    w.addon:AddLootBannerItem(WON)
+    pumpN(w, 0.01, 5)
+    local reused = firstWonRow(w)
+    check(reused == row, "the new win reused the freed slot")
+    check(reused.CloseButton.__alpha == 1, "the close button alpha was reset to 1 on reuse")
+    check(reused.RerollButton.__alpha == 1, "the reroll button alpha was reset to 1 on reuse")
+end)
+
 test("drops banner (roll cards) sits a clear band above the awarded banner (win cards)", function()
     -- The two banners overlap in one region (awarded pulled up into the drops footer). Regression
     -- for the cross-banner layering bug where a win card's bg tint covered a roll card's countdown

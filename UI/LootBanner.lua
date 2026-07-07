@@ -1348,8 +1348,10 @@ local function buildBanner(bannerName, medallionCfg)
         relayoutAliveRows(self)
         frame.holdOpen = nil            -- won-row hold state; set below for a held-open won row
         frame.closeImmediate = nil
+        frame.CloseButton:SetAlpha(1)   -- a reused slot may carry a stale fade alpha; clear it like the roll buttons do
         frame.CloseButton:Hide()        -- only a held-open won row shows it (armed below / by the timer)
         frame.onReroll = nil
+        frame.RerollButton:SetAlpha(1)
         frame.RerollButton:Hide()       -- only a no-winner won card shows it
         if data.rollDuration then
             -- roll-prompt row: a countdown of the roll timer + clickable bracket buttons. The live

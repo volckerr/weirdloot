@@ -145,6 +145,10 @@ function self.makeWorld(playerName, isML)
                 or k == "GetEffectiveAlpha" then
                 -- scale/alpha getters also feed arithmetic (banner row layout, fade math); return 1.
                 return function() return 1 end
+            elseif k == "SetAlpha" then
+                -- record the last set alpha (on __alpha) so reuse/reset tests can assert it, while
+                -- GetAlpha above still returns 1 for layout math.
+                return function(s, a) s.__alpha = a; return s end
             elseif k == "Show" then
                 return function(s) s.__shown = true; return s end
             elseif k == "Hide" then
