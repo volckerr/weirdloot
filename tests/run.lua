@@ -1150,6 +1150,20 @@ test("hideUnrolledWins on: leaving the default Pass (no action) is suppressed to
     eq(#raider.addon._bannerItems, 0, "you only see banners for loot you actually rolled on")
 end)
 
+test("no-winner resolve: the ML gets a 'no one rolled' card with a working reroll", function()
+    local ml, raider, lot = rollWithRaider(40005)
+    ml.addon:ResolveLiveRoll(lot.id)   -- nobody rolled (all default pass) -> no winner
+    eq(#ml.addon._bannerItems, 1, "the ML still gets a win card for a no-winner roll")
+    local item = ml.addon._bannerItems[1]
+    check(item.noWinner, "the card is flagged no-winner")
+    check(type(item.onReroll) == "function", "and carries a reroll callback")
+    local core = ml.addon.lootCore
+    check(core:IsResolved(lot.id), "the lot is resolved after the empty roll")
+    item.onReroll()
+    check(not core:IsResolved(lot.id), "reroll unlocked the lot")
+    check(ml.addon.live.rolls[lot.id] ~= nil, "a fresh roll is live after reroll")
+end)
+
 test("hideUnrolledWins on: a filtered-out (blacklisted) item's win is suppressed even if not passed", function()
     local ml, raider, lot = rollWithRaider(40005)   -- "Blade of Test"
     raider.addon.db.options.hideUnrolledWins = true

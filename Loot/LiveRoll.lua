@@ -1747,6 +1747,10 @@ function addon:ResolveLiveRoll(rollId)
     self:CloseInterestPopup(roll)
     if #winners > 0 then
         self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))
+    else
+        -- No one rolled: the ML still gets a win card (so the drop is not silently gone) that says as
+        -- much and offers an immediate reroll. Raiders get no card for a no-winner resolve.
+        self:AddLootBannerItem(self:BannerNoWinnerItem(roll))
     end
     self.live.rolls[rollId] = nil   -- live-roll UI done; the core holds the truth
 
@@ -1849,6 +1853,23 @@ function addon:BannerItemFromResult(roll, winners, sections)
         why = why,
         winners = winnerList,
         rolls = rolls,
+    }
+end
+
+-- A no-winner win card for the loot master: shows the item with a "no one rolled" line and a reroll
+-- button. Reroll = unlock the resolved lot (back to rollable) then start a fresh roll, the same two
+-- steps the ML does by hand via Unlock Roll + Start. ML-only (built only on the resolving client).
+function addon:BannerNoWinnerItem(roll)
+    local lotId = roll.id
+    return {
+        key = lotId,
+        link = roll.link,
+        icon = roll.icon,
+        quantity = roll.quantity,
+        noWinner = true,
+        onReroll = function()
+            if self:UnlockSessionRoll(lotId) then self:StartLiveRoll(lotId) end
+        end,
     }
 end
 

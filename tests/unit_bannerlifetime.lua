@@ -124,4 +124,31 @@ test("clicking the close button dismisses that row", function()
     check(not row.alive, "the row was dismissed and removed")
 end)
 
+test("no-winner card: shows a reroll button that fires its callback and dismisses the card", function()
+    local w = bannerWorld(true, function(opt)
+        opt.forceKeepResultPopup = true
+        opt.resultPopupAutoCloseEnabled = true
+        opt.resultPopupAutoCloseSeconds = 10
+    end)
+    local fired = false
+    w.addon:AddLootBannerItem({
+        link = WON.link, icon = "x", quantity = 1, noWinner = true,
+        onReroll = function() fired = true end,
+    })
+    local row
+    for _ = 1, 60 do
+        F.pump(w, 0.001)
+        row = firstWonRow(w)
+        if row then break end
+    end
+    check(row, "the no-winner card was shown")
+    check(row.RerollButton:IsShown(), "the reroll button is shown on a no-winner card")
+    local onClick = row.RerollButton:GetScript("OnClick")
+    check(type(onClick) == "function", "the reroll button has an OnClick handler")
+    onClick(row.RerollButton)
+    check(fired, "clicking reroll fired the callback")
+    pumpN(w, 0.05, 3)   -- instant fade -> removed
+    check(not row.alive, "the card dismissed itself after reroll")
+end)
+
 F.endSuite()

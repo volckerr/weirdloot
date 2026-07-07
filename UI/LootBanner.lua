@@ -382,6 +382,8 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
         -- roll card: the item's prio sits under the name (bracket buttons sit below it), mirroring
         -- the original roll popup's "Prio:" line.
         nameText = rollPrioText(data.prio)
+    elseif data.noWinner then
+        nameText = "|cffaaaaaaNo one rolled|r"   -- ML-only card: the reroll button sits opposite
     elseif data.prompt then
         nameText = data.prompt
     else
@@ -882,6 +884,26 @@ local function buildBanner(bannerName, medallionCfg)
         end)
         frame.CloseButton:Hide()
 
+        -- Reroll (won card, ML only): shown on a "no one rolled" card so the loot master can put the
+        -- item straight back up. Clicking runs the row's onReroll (unlock + restart) and dismisses
+        -- this card. Sits on the right where the winner line would be.
+        frame.RerollButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+        frame.RerollButton:SetText("Reroll")
+        frame.RerollButton:SetWidth(60)
+        frame.RerollButton:SetHeight(18)
+        -- bottom-right, right edge aligned with the Pass bracket's right edge on a roll card (the
+        -- brackets end at x=250 of the 269-wide row, i.e. -19 from the right); clears the "No one
+        -- rolled" line on the left and the top-right close (X) corner
+        frame.RerollButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -19, 5)
+        frame.RerollButton:SetScript("OnClick", function()
+            local cb = frame.onReroll
+            frame.fading = true
+            frame.fadeLeft = parent.instant and 0 or ROW_FADE_TIME
+            frame.RerollButton:Hide()
+            if cb then cb() end
+        end)
+        frame.RerollButton:Hide()
+
         tinsert(parent.LootFrames, frame)
         frame.__idx = #parent.LootFrames   -- stable id for diagnostics
 
@@ -1318,6 +1340,8 @@ local function buildBanner(bannerName, medallionCfg)
         frame.holdOpen = nil            -- won-row hold state; set below for a held-open won row
         frame.closeImmediate = nil
         frame.CloseButton:Hide()        -- only a held-open won row shows it (armed below / by the timer)
+        frame.onReroll = nil
+        frame.RerollButton:Hide()       -- only a no-winner won card shows it
         if data.rollDuration then
             -- roll-prompt row: a countdown of the roll timer + clickable bracket buttons. The live
             -- feed passes getTimeLeft (the roll's own deadline is the clock; self-correcting and
@@ -1379,6 +1403,8 @@ local function buildBanner(bannerName, medallionCfg)
         frame.closeImmediate = frame.holdOpen and resultCloseImmediate()
         frame.timeLeft = examine
         if frame.closeImmediate then frame.CloseButton:Show() end   -- ML: no wait
+        frame.onReroll = data.onReroll
+        if data.onReroll then frame.RerollButton:Show() end   -- "no one rolled" ML card
         if additional then
             for _, f in ipairs(self.LootFrames) do
                 if f.alive and f ~= frame and not f.rollDuration then
@@ -1449,6 +1475,7 @@ local function buildBanner(bannerName, medallionCfg)
                         if f.RollButtons then for _, btn in ipairs(f.RollButtons) do btn:SetAlpha(1); btn:Hide() end end
                         if f.MLButtons then for _, btn in ipairs(f.MLButtons) do btn:SetAlpha(1); btn:Hide() end end
                         if f.CloseButton then f.CloseButton:Hide() end
+                        if f.RerollButton then f.RerollButton:Hide() end
                         removed = true
                     else
                         f:SetAlpha(f.fadeLeft / ROW_FADE_TIME)
@@ -1588,6 +1615,7 @@ local function buildBanner(bannerName, medallionCfg)
             if f.RollButtons then for _, btn in ipairs(f.RollButtons) do btn:SetAlpha(1); btn:Hide() end end
             if f.MLButtons then for _, btn in ipairs(f.MLButtons) do btn:SetAlpha(1); btn:Hide() end end
             if f.CloseButton then f.CloseButton:Hide() end
+            if f.RerollButton then f.RerollButton:Hide() end
             f:Hide()
         end
         banner:SetHeight(banner.baseHeight)
@@ -1718,6 +1746,8 @@ local function buildBanner(bannerName, medallionCfg)
             fallbackName = item.fallbackName, -- shown when the link is a bare item:id (cold cache)
             winner = item.winner, winnerClass = item.winnerClass, why = item.why,
             winners = item.winners, rolls = item.rolls, prompt = item.prompt, rollDuration = item.rollDuration,
+            noWinner = item.noWinner,   -- won card only: nobody rolled -> "No one rolled" line + reroll
+            onReroll = item.onReroll,   -- won card only: ML reroll callback; present = show the Reroll button
             rollRemaining = item.rollRemaining, -- static seconds-left (demo/plain data; ignored with a thunk)
             getTimeLeft = item.getTimeLeft, -- live feed: per-tick seconds left from the roll's own deadline
             key = item.key,             -- roll card only: lets the live feed close/update the card by id
