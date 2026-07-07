@@ -450,7 +450,16 @@ local ROW_FADE_TIME = 0.4   -- seconds a row takes to fade out once its lifetime
 
 -- "Players Rolling" hover: bracket priority order for the roller list, mirroring the roll popup's
 -- count hover (rollerSort in LiveRoll): highest bracket first, then name.
-local BRACKET_RANK = { BiS = 1, MS = 2, MU = 3, OS = 4, TM = 5, Pass = 6 }
+local BRACKET_RANK = util.BracketRank   -- label -> priority rank (bis = 1 .. pass = 6)
+
+-- Roll-prompt bracket buttons in canonical order; only the per-bracket button width is UI-specific,
+-- the label and order come from the shared set.
+local BRACKET_BTN_WIDTH = { bis = 30, ms = 28, mu = 30, os = 28, tm = 28, pass = 40 }
+local BRACKET_BUTTONS = {}
+for _, key in ipairs(util.RollTiers) do
+    BRACKET_BUTTONS[#BRACKET_BUTTONS + 1] = { util.BracketLabels[key], BRACKET_BTN_WIDTH[key] }
+end
+
 local function sortedRollers(list)
     local out = {}
     for _, r in ipairs(list or {}) do out[#out + 1] = r end
@@ -1012,7 +1021,7 @@ local function buildBanner(bannerName, medallionCfg)
 
         -- Bracket buttons for roll-prompt rows (hidden on awarded rows). Clicking selects a bracket;
         -- the choice stays highlighted. (Wiring to the real roll response is the next step.)
-        local BRACKETS = { { "BiS", 30 }, { "MS", 28 }, { "MU", 30 }, { "OS", 28 }, { "TM", 28 }, { "Pass", 40 } }
+        local BRACKETS = BRACKET_BUTTONS
         frame.RollButtons = {}
         local bx = 56
         for _, b in ipairs(BRACKETS) do
@@ -2123,9 +2132,9 @@ local function runBannerExample()
     }) do
         if e.n ~= playerName then roster[#roster + 1] = e end
     end
-    local responses = { "bis", "ms", "mu", "os" }
+    local responses = { "bis", "ms", "mu", "os" }   -- preview scope: fabricate rollers for these brackets
 
-    local LABEL = { bis = "BiS", ms = "MS", mu = "MU", os = "OS" }
+    local LABEL = util.BracketLabels
     local statuses = { "main", "designatedalt", "nil" }
 
     local function buildWon(base, forceQty)

@@ -325,7 +325,6 @@ local POPUP_INTEREST_EMPTY_H = 64       -- floor height for a compact raider pop
 local POPUP_INTEREST_OWNER_H = 64       -- floor for the ML popup: End/Cancel live in the TOP-RIGHT corner, so the popup matches the raider's height
                                         -- the brackets, so the brackets push up; this keeps them clear
                                         -- of the item icon/name instead of overlapping (mis-clicks).
-local RESPONSE_ORDER = { bis = 5, ms = 4, mu = 3, os = 2, tm = 1, pass = 0 }
 -- Shown "Prio:" string for an item with no listed priority. BiS is omitted: a no-prio item cannot
 -- roll BiS (see util:RollTierAvailability), so its default order starts at MS.
 local DEFAULT_PRIO = "MS > MU > OS > TM"
@@ -458,10 +457,10 @@ end
 -- Order any roller list highest bracket first, then by name. Shared so the live registrant list
 -- and the ledger-backed list come out in the same order on every surface.
 local function rollerSort(left, right)
-    local leftRank = RESPONSE_ORDER[left.tier] or 0
-    local rightRank = RESPONSE_ORDER[right.tier] or 0
+    local leftRank = util.RollTierRank[left.tier] or 99
+    local rightRank = util.RollTierRank[right.tier] or 99
     if leftRank ~= rightRank then
-        return leftRank > rightRank
+        return leftRank < rightRank
     end
     return string.lower(left.name or "") < string.lower(right.name or "")
 end
@@ -626,9 +625,9 @@ local DISABLED_REASON_TEXT = {
     noprio = "No priority is listed for this item.",
 }
 
--- Banner roll cards label their bracket buttons BiS/MS/MU/OS/TM/Pass (compact "TM", unlike the
--- popup hover's spelled-out "Tmog"); these map tier keys to card labels and back.
-local CARD_BRACKETS = { bis = "BiS", ms = "MS", mu = "MU", os = "OS", tm = "TM", pass = "Pass" }
+-- Banner roll cards label their bracket buttons from the canonical compact map (util.BracketLabels:
+-- "TM", unlike the popup hover's spelled-out "Tmog"). CARD_TIERS is the reverse (label -> key).
+local CARD_BRACKETS = util.BracketLabels
 local CARD_TIERS = {}
 for tier, label in pairs(CARD_BRACKETS) do CARD_TIERS[label] = tier end
 
@@ -1765,8 +1764,9 @@ end
 
 -- Group a result record's rollers by bracket into the popup's section format
 -- ({label, members={{name, roll}}}), highest bracket first, for the result popup breakdown.
-local SECTION_ORDER = { "bis", "ms", "mu", "os", "tm" }
-local SECTION_LABELS = { bis = "BiS", ms = "MS", mu = "MU", os = "OS", tm = "TM" }
+-- Passers don't get a result section, so this is the win-tier order; labels from the shared map.
+local SECTION_ORDER = util.WinTiers
+local SECTION_LABELS = util.BracketLabels
 local function sectionMemberSortValue(member)
     if member.auto or member.rollText == "AUTO" then
         return 101
