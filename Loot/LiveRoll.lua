@@ -1260,6 +1260,7 @@ function addon:ShowRollBannerCard(roll)
 
     local mine = self:GetPlayerResponse(roll.id, playerName)
     roll.choice = mine
+    roll.passed = (mine == "pass")   -- see ShowInterestPopup: default Pass counts for hidePassedWins
 
     -- Callbacks resolve the CURRENT roll object by id at click time, not the one captured now: a
     -- restore and the DROP can both build a roll for the same lot (sync delta lands first), and the
@@ -1366,6 +1367,10 @@ function addon:ShowInterestPopup(roll, slot)
     -- re-asserts it below from roll.choice).
     local mine = self:GetPlayerResponse(roll.id, util:GetPlayerName("player"))
     roll.choice = mine   -- includes "pass": a prior pass opens with the Pass button highlighted
+    -- Seed the Pass stance from the durable response (default is "pass"), so hidePassedWins treats
+    -- anything left on the default Pass as passed. Derived from stored state so it survives a
+    -- rebuild (duplicate DROP), a relog, or a prefire; a live bracket click updates it (ChooseInterest).
+    roll.passed = (mine == "pass")
     f.icon:SetTexture(roll.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = roll.link
     f.name:SetText(formatRollItemLabel(roll.link, roll.name, roll.quantity))
@@ -1982,8 +1987,9 @@ function addon:OnWinMessage(fields)
     -- whether they still had the interest popup open or already dismissed it. Close any lingering
     -- roll surface first (popup or banner card) so it does not sit behind the win.
     self:CloseInterestPopup(roll)
-    -- Opt-out: a raider who explicitly passed can suppress the win banner for that item (they already
-    -- declined it, so the result is noise). Off by default; the ML and non-passers always see it.
+    -- Opt-out: with hidePassedWins on, a raider only sees win banners for loot they actually rolled
+    -- on; anything left on the default Pass (or explicitly passed) is suppressed as noise. Off by
+    -- default; the ML always sees results (its own resolve path is ungated).
     local suppressed = getOptions().hidePassedWins and roll.passed
     if #winners > 0 and not suppressed then
         local sections = self:DecodeSections(sectionsText)

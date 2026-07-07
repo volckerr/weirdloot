@@ -1140,6 +1140,16 @@ test("hidePassedWins on: a non-passer still sees the win banner", function()
     eq(#raider.addon._bannerItems, 1, "the option only suppresses items you actually passed on")
 end)
 
+test("hidePassedWins on: leaving the default Pass (no action) is suppressed too", function()
+    local ml, raider, lot = rollWithRaider(40006)
+    raider.addon.db.options.hidePassedWins = true
+    local roll = rollFor(raider, lot.id)
+    check(roll.passed, "the roll seeds passed=true from the default Pass response (no action taken)")
+    ml.addon:SetPlayerResponse(lot.id, "Alice", "ms")   -- Alice wins
+    ml.addon:ResolveLiveRoll(lot.id); flushWireTo(raider)
+    eq(#raider.addon._bannerItems, 0, "you only see banners for loot you actually rolled on")
+end)
+
 -- ---------------------------------------------------------------------------
 -- banner roll cards: the live wiring. The banner is the default surface in-game; the harness stub
 -- refuses cards by default (popup battery above tests the fallback path), so these opt in.
