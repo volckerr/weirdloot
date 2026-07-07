@@ -131,10 +131,16 @@ function self.makeWorld(playerName, isML)
             elseif k == "NumLines" then
                 return function() return 0 end
             elseif k == "GetStringHeight" or k == "GetHeight" or k == "GetWidth"
-                or k == "GetFrameLevel" or k == "GetNumPoints" or k == "GetID" then
+                or k == "GetNumPoints" or k == "GetID" then
                 -- measurement / numeric getters feed arithmetic (e.g. frame-level + offset,
                 -- math.ceil in the popup-height helpers); return a number, not the chainable frame.
                 return function() return 0 end
+            elseif k == "SetFrameLevel" then
+                return function(s, n) s.__level = n; return s end
+            elseif k == "GetFrameLevel" then
+                -- model frame levels so banner layering (row vs child widgets) is testable; a child
+                -- defaults to parent+1 (set in CreateFrame), SetFrameLevel overrides.
+                return function(s) return s.__level or 1 end
             elseif k == "GetEffectiveScale" or k == "GetScale" or k == "GetAlpha"
                 or k == "GetEffectiveAlpha" then
                 -- scale/alpha getters also feed arithmetic (banner row layout, fade math); return 1.
@@ -209,9 +215,10 @@ function self.makeWorld(playerName, isML)
 
     -- ---- WoW API stubs ----
     local SCAN_TIP_NAMES = { TradeDeliverScanTip = true, WeirdLootScanTooltip = true }
-    env.CreateFrame = function(_, name)
+    env.CreateFrame = function(_, name, parent)
         local f = SCAN_TIP_NAMES[name] and newScanTip(name) or newFrame()
         if name then env[name] = f; f.__name = name end
+        f.__level = (parent and parent.__level or 0) + 1   -- child defaults one above its parent
         return f
     end
     env.UIParent = newFrame()

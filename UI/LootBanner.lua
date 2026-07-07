@@ -1838,6 +1838,15 @@ local awardedBanner = buildBanner("WeirdLootAwardedBanner",
     { atlas = "LootBanner-LootBagCircle", badgeTexture = "Interface\\AddOns\\WeirdLoot\\Textures\\LootPouches" })
 local dropsBanner = buildBanner("WeirdLootDropsBanner", { texture = DICE_TEXTURE })
 
+-- The two banners overlap in one region (awarded is pulled up into the drops banner's footer), and
+-- they are independent frame hierarchies. Keep the drops banner (roll cards) a full band above the
+-- awarded banner (win cards) so a win card's background tint never covers a roll card's countdown
+-- bar where they overlap. Rows re-derive their level from their banner's (relayoutAliveRows: base =
+-- banner level + 3, rows a few levels above that), and each banner's row range is well under 60, so
+-- this gap keeps every roll-card widget above every win card.
+awardedBanner:SetFrameLevel(5)
+dropsBanner:SetFrameLevel(65)
+
 local REGION_TOP = -120
 -- positive pulls the awarded banner UP into the drops banner's bottom chrome reserve, closing the
 -- dead space between the last drop row and the awarded medallion. Tune to taste.

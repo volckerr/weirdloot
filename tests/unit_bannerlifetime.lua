@@ -151,4 +151,16 @@ test("no-winner card: shows a reroll button that fires its callback and dismisse
     check(not row.alive, "the card dismissed itself after reroll")
 end)
 
+test("drops banner (roll cards) sits a clear band above the awarded banner (win cards)", function()
+    -- The two banners overlap in one region (awarded pulled up into the drops footer). Regression
+    -- for the cross-banner layering bug where a win card's bg tint covered a roll card's countdown
+    -- bar: the drops banner must outrank the awarded banner by a wide enough margin that every roll
+    -- row (and its child widgets) stays above every win row.
+    local w = bannerWorld(true)
+    local drops = w.env.WeirdLootDropsBanner:GetFrameLevel()
+    local awarded = w.env.WeirdLootAwardedBanner:GetFrameLevel()
+    check(drops > awarded + 30,
+        "drops banner level (" .. drops .. ") outranks awarded (" .. awarded .. ") by a full band")
+end)
+
 F.endSuite()
