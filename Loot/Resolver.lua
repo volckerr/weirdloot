@@ -592,8 +592,9 @@ end
 -- result record. Does NOT lock or append -- the caller does that.
 -- Resolve one lot. `lot` is a LootCore lot: identity is lot.itemId, count is lot.count, and
 -- the responses live on lot.responses. Display fields are rendered from itemId on demand.
--- Response tiers in priority order. "pass" is intentionally absent: passers don't win.
-local RESPONSE_TIER_ORDER = { "bis", "ms", "mu", "os", "tm" }
+-- Response tiers in priority order. "pass" is intentionally absent (passers don't win), which is
+-- exactly util.WinTiers.
+local RESPONSE_TIER_ORDER = util.WinTiers
 
 local function rollersForResponseType(rollers, responseType)
     local out = {}

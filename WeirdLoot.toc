@@ -2,7 +2,7 @@
 ## Title: WeirdLoot
 ## Notes: Live loot co-ordination for Weird Vibes raids
 ## Author: Volcker
-## Version: 1.2.5
+## Version: 1.2.12
 ## IconTexture: Interface\AddOns\WeirdLoot\Textures\weirdloot
 ## SavedVariables: WeirdLootDB, WeirdLootSessionDB
 ## SavedVariablesPerCharacter: WeirdLootCharDB, WeirdLootDebugLog
@@ -48,6 +48,7 @@ Trade\Payout.lua
 
 UI\UI.lua
 UI\Common.lua
+UI\LootBanner.lua
 UI\Popups.lua
 UI\Export.lua
 UI\Minimap.lua

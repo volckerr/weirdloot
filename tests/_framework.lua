@@ -131,10 +131,32 @@ function self.makeWorld(playerName, isML)
             elseif k == "NumLines" then
                 return function() return 0 end
             elseif k == "GetStringHeight" or k == "GetHeight" or k == "GetWidth"
-                or k == "GetFrameLevel" or k == "GetNumPoints" or k == "GetID" then
+                or k == "GetNumPoints" or k == "GetID" then
                 -- measurement / numeric getters feed arithmetic (e.g. frame-level + offset,
                 -- math.ceil in the popup-height helpers); return a number, not the chainable frame.
                 return function() return 0 end
+            elseif k == "SetFrameLevel" then
+                return function(s, n) s.__level = n; return s end
+            elseif k == "GetFrameLevel" then
+                -- model frame levels so banner layering (row vs child widgets) is testable; a child
+                -- defaults to parent+1 (set in CreateFrame), SetFrameLevel overrides.
+                return function(s) return s.__level or 1 end
+            elseif k == "GetEffectiveScale" or k == "GetScale" or k == "GetAlpha"
+                or k == "GetEffectiveAlpha" then
+                -- scale/alpha getters also feed arithmetic (banner row layout, fade math); return 1.
+                return function() return 1 end
+            elseif k == "SetAlpha" then
+                -- record the last set alpha (on __alpha) so reuse/reset tests can assert it, while
+                -- GetAlpha above still returns 1 for layout math.
+                return function(s, a) s.__alpha = a; return s end
+            elseif k == "Show" then
+                return function(s) s.__shown = true; return s end
+            elseif k == "Hide" then
+                return function(s) s.__shown = false; return s end
+            elseif k == "IsShown" or k == "IsVisible" then
+                -- track real shown state so banner-row tests can assert a close button / row is
+                -- shown or hidden. Unset defaults to shown (WoW's default for a fresh frame).
+                return function(s) if s.__shown == nil then return true end return s.__shown end
             elseif k == "GetFrameStrata" then
                 return function() return "DIALOG" end
             elseif k == "GetName" then
@@ -197,14 +219,17 @@ function self.makeWorld(playerName, isML)
 
     -- ---- WoW API stubs ----
     local SCAN_TIP_NAMES = { TradeDeliverScanTip = true, WeirdLootScanTooltip = true }
-    env.CreateFrame = function(_, name)
+    env.CreateFrame = function(_, name, parent)
         local f = SCAN_TIP_NAMES[name] and newScanTip(name) or newFrame()
         if name then env[name] = f; f.__name = name end
+        f.__level = (parent and parent.__level or 0) + 1   -- child defaults one above its parent
         return f
     end
     env.UIParent = newFrame()
     env.WorldFrame = newFrame()
     env.GameTooltip = newFrame()
+    env.IsDressableItem = function() return false end   -- banner set-name scan: no set line in tests
+    env.SetItemButtonQuality = function() end
     env.DEFAULT_CHAT_FRAME = setmetatable({ AddMessage = function() end }, { __index = function() return function() end end })
     env.GetTime = function() return self.CLOCK end
     env.time = function() return self.CLOCK end
@@ -390,6 +415,35 @@ function self.makeWorld(playerName, isML)
     end
     local addon = env.WeirdLoot
     addon.InitializeUI = function() end       -- UI not loaded in the harness
+    -- LootBanner.lua (the win display) is excluded from the harness: it builds animation frames at
+    -- load time that the lightweight CreateFrame stub does not model. Stub the entry points the
+    -- resolve path calls, recording items so resolution tests can assert the banner payload.
+    addon._bannerItems = {}
+    addon.AddLootBannerItem = function(_, item) addon._bannerItems[#addon._bannerItems + 1] = item end
+    addon.ShowLootBanner = function() end
+    -- roll cards (the drops banner): record adds/closes/choice-syncs so the live-wiring tests can
+    -- assert them. The banner is the default roll surface in-game; the harness default REFUSES
+    -- cards so the long-standing popup battery keeps exercising the fallback popup path unchanged.
+    -- Card-path tests opt in with _rollBannerAccept = true.
+    addon._rollBannerItems = {}
+    addon._rollBannerClosed = {}
+    addon._rollBannerChoices = {}
+    addon._rollBannerAccept = false
+    addon.AddRollBannerItem = function(_, item)
+        if not addon._rollBannerAccept then return false end
+        addon._rollBannerItems[#addon._rollBannerItems + 1] = item
+        return true
+    end
+    addon.CloseRollBannerCard = function(_, key)
+        addon._rollBannerClosed[#addon._rollBannerClosed + 1] = key
+    end
+    addon._rollBannerRefreshes = {}
+    addon.RefreshRollBannerCard = function(_, key, link, icon)
+        addon._rollBannerRefreshes[#addon._rollBannerRefreshes + 1] = { key = key, link = link, icon = icon }
+    end
+    addon.SetRollBannerCardChoice = function(_, key, bracket)
+        addon._rollBannerChoices[#addon._rollBannerChoices + 1] = { key = key, bracket = bracket }
+    end
     addon:PLAYER_LOGIN()
     if os.getenv("WLDEBUG") then env.WeirdLootDB.payoutDebug = true end
     local shippedDefaults = {
@@ -469,6 +523,15 @@ function self.loadUI(w)
         setfenv(chunk, w.env)
         chunk()
     end
+end
+
+-- Load the real UI/LootBanner.lua into a world so its win-row engine (addRow / updateRowLifetimes,
+-- close-button timing) can be driven and asserted directly, rather than stubbed. The banners are
+-- named frames, reachable as w.env.WeirdLootAwardedBanner / WeirdLootDropsBanner.
+function self.loadBanner(w)
+    local chunk = assert(loadfile("UI/LootBanner.lua"), "loadfile failed: UI/LootBanner.lua")
+    setfenv(chunk, w.env)
+    chunk()
 end
 
 -- ---------------------------------------------------------------------------

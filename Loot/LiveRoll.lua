@@ -284,10 +284,16 @@ end
 function addon:RestoreRollPopup(lot)
     local name, link, icon = util:ItemRender(lot.itemId)
     local remaining = (self._rollRemaining and self._rollRemaining[lot.id]) or getRollDuration()
+    -- The ML's broadcast prio is not persisted on the synced lot, so a restore (relog, or the
+    -- ROLLING delta racing ahead of the DROP) has no authoritative prio. Fall back to this client's
+    -- own listed priority rather than "" -- an empty prio would wrongly gate BiS as "no priority".
+    -- If the DROP then lands (the race), ShowRollBannerCard's dedupe re-assert corrects it to the
+    -- ML's exact prio + availability.
+    local prio = (name and self:GetLiveItemPrio({ name = name })) or ""
     local roll = {
         id = lot.id, itemId = lot.itemId, link = link,
         name = name or link or ("item:" .. tostring(lot.itemId)),
-        icon = icon, prio = "", owner = false, registrants = {}, resolved = false,
+        icon = icon, prio = prio, owner = false, registrants = {}, resolved = false,
         quantity = lot.count or 1,
         duration = getRollDuration(),
         deadline = GetTime() + remaining,
@@ -319,10 +325,10 @@ local POPUP_INTEREST_EMPTY_H = 64       -- floor height for a compact raider pop
 local POPUP_INTEREST_OWNER_H = 64       -- floor for the ML popup: End/Cancel live in the TOP-RIGHT corner, so the popup matches the raider's height
                                         -- the brackets, so the brackets push up; this keeps them clear
                                         -- of the item icon/name instead of overlapping (mis-clicks).
-local RESPONSE_ORDER = { bis = 5, ms = 4, mu = 3, os = 2, tm = 1, pass = 0 }
 -- Shown "Prio:" string for an item with no listed priority. BiS is omitted: a no-prio item cannot
 -- roll BiS (see util:RollTierAvailability), so its default order starts at MS.
 local DEFAULT_PRIO = "MS > MU > OS > TM"
+addon.DEFAULT_PRIO = DEFAULT_PRIO   -- the banner roll cards show the same no-prio bracket order
 -- Display labels for the rolling hover lists (live loot popup + loot tab row). The TM bracket
 -- spells out "Tmog" here so the reader instantly knows what the roller wants, without conflating
 -- it with the compact "TM" abbreviation used on the bracket buttons themselves.
@@ -451,10 +457,10 @@ end
 -- Order any roller list highest bracket first, then by name. Shared so the live registrant list
 -- and the ledger-backed list come out in the same order on every surface.
 local function rollerSort(left, right)
-    local leftRank = RESPONSE_ORDER[left.tier] or 0
-    local rightRank = RESPONSE_ORDER[right.tier] or 0
+    local leftRank = util.RollTierRank[left.tier] or 99
+    local rightRank = util.RollTierRank[right.tier] or 99
     if leftRank ~= rightRank then
-        return leftRank > rightRank
+        return leftRank < rightRank
     end
     return string.lower(left.name or "") < string.lower(right.name or "")
 end
@@ -532,12 +538,6 @@ local function getCompactPopupHeight(f)
     local subHeight = math.ceil(f.sub:GetStringHeight() or 0)
     local floor = f.isOwner and POPUP_INTEREST_OWNER_H or POPUP_INTEREST_EMPTY_H
     return math.max(floor, 39 + nameHeight + subHeight)
-end
-
-local function getCompactResultPopupHeight(f)
-    local nameHeight = math.ceil(f.name:GetStringHeight() or 0)
-    local subHeight = math.ceil(f.sub:GetStringHeight() or 0)
-    return math.max(62, 34 + nameHeight + subHeight)
 end
 
 local function showRollCountTooltip(self, f)
@@ -624,6 +624,12 @@ local DISABLED_REASON_TEXT = {
     quest = "You have already completed this quest.",
     noprio = "No priority is listed for this item.",
 }
+
+-- Banner roll cards label their bracket buttons from the canonical compact map (util.BracketLabels:
+-- "TM", unlike the popup hover's spelled-out "Tmog"). CARD_TIERS is the reverse (label -> key).
+local CARD_BRACKETS = util.BracketLabels
+local CARD_TIERS = {}
+for tier, label in pairs(CARD_BRACKETS) do CARD_TIERS[label] = tier end
 
 local function applyInterestButtonAvailability(self, f, roll)
     local playerName = util:GetPlayerName("player")
@@ -800,6 +806,9 @@ function addon:ApplyLocalChoice(lotId, tier)
     if roll and not roll.resolved then
         roll.choice = tier
         if roll.popup then highlightInterestButton(roll.popup, roll.choice) end
+        if self.SetRollBannerCardChoice then
+            self:SetRollBannerCardChoice(lotId, tier and CARD_BRACKETS[tier] or nil)
+        end
     end
     if self.MarkLocalLootChoice then self:MarkLocalLootChoice(lotId, tier) end
 end
@@ -991,8 +1000,6 @@ local function compactPopups(self)
     layoutPopups(self)
 end
 
--- How long the result popup takes to fade out after its auto-close timer expires.
-local RESULT_FADE_SECONDS = 0.4
 
 local function closePopup(self, f)
     if not f then return end
@@ -1003,24 +1010,6 @@ local function closePopup(self, f)
     removeActive(self, f)
     self.live.pool[#self.live.pool + 1] = f
     layoutPopups(self)
-end
-
--- Fade the result popup out over RESULT_FADE_SECONDS, then close it and free its slot. Shared by
--- the auto-close timer expiry (after the countdown) and the immediate timeout == 0 close, so both
--- ease away the same way rather than snapping shut.
-local function beginResultFadeOut(self, f)
-    f.fadeElapsed = 0
-    f:SetScript("OnUpdate", function(fadeFrame, elapsed)
-        fadeFrame.fadeElapsed = fadeFrame.fadeElapsed + (elapsed or 0)
-        local a = 1 - fadeFrame.fadeElapsed / RESULT_FADE_SECONDS
-        if a <= 0 then
-            fadeFrame:SetScript("OnUpdate", nil)
-            closePopup(self, fadeFrame)     -- restores alpha to 1 on the pooled frame
-            compactPopups(self)
-        else
-            fadeFrame:SetAlpha(a)
-        end
-    end)
 end
 
 -- Late-bound method wrapper so the event handlers defined earlier (SyncPendingPopups) can
@@ -1192,6 +1181,17 @@ function addon:EnsureNameTicker()
             if self.RefreshResultsTab then self:RefreshResultsTab() end
             if self._lootNamesPending then pending = pending + 1 end
         end
+        -- banner roll cards created on a cold cache re-render in place once their item resolves
+        -- (ItemRender always synthesizes a link; the NAME arriving is the resolve signal)
+        for key, itemId in pairs(self._bannerNamesPending or {}) do
+            local cardName, cardLink, cardIcon = util:ItemRender(itemId)
+            if cardName then
+                if self.RefreshRollBannerCard then self:RefreshRollBannerCard(key, cardLink, cardIcon) end
+                self._bannerNamesPending[key] = nil
+            else
+                pending = pending + 1
+            end
+        end
         if pending == 0 then
             anchor:SetScript("OnUpdate", nil)
             anchor.__nameTicker = nil
@@ -1229,10 +1229,117 @@ function addon:WarmLootItemNames(items)
 end
 
 -- ---------------------------------------------------------------------------
+-- banner roll card: the drops banner is the roll surface; the interest popup below survives only
+-- as the fallback when the banner can't take a card. The card applies the same policy as the
+-- popup (bracket availability, prefired pick, honest deadline) and routes clicks back through the
+-- same choice and ML paths. Roll cards are never capped (the ML decides how many rolls go out);
+-- false falls back to the popup (roll already over, or a defensive banner refusal) so a roll is
+-- never lost to the banner.
+-- ---------------------------------------------------------------------------
+function addon:ShowRollBannerCard(roll)
+    if not self.AddRollBannerItem then return false end
+    local remaining = (roll.deadline or (GetTime() + (roll.duration or ROLL_DURATION))) - GetTime()
+    if remaining <= 0 then return false end
+
+    -- ItemRender always synthesizes a link; a nil NAME is the cold-cache signal (as TrackPopupItem)
+    local itemName, link, icon = util:ItemRender(roll.itemId)
+    if not itemName then self:PrimeItemInfo(roll.itemId) end   -- cold cache: card shows item:id at first
+
+    local playerName = util:GetPlayerName("player")
+    local allowed = isPlayerAllowedForRoll(self, roll, playerName)
+    local blockReason = self:RollSelfBlockReason(roll.itemId)
+    -- same ML-authority rule as the popup: BiS follows the prio the ML broadcast, not local lists
+    local hasPrio = roll.prio ~= nil and roll.prio ~= "" and roll.prio ~= DEFAULT_PRIO
+    local avail = util:RollTierAvailability(roll.itemId, allowed, false, blockReason, hasPrio)
+    local disabled = {}
+    for tier, reason in pairs(avail) do
+        local label = CARD_BRACKETS[tier]
+        if label then disabled[label] = DISABLED_REASON_TEXT[reason] or true end
+    end
+
+    local mine = self:GetPlayerResponse(roll.id, playerName)
+    roll.choice = mine
+    roll.passed = (mine == "pass")   -- see ShowInterestPopup: default Pass counts for hideUnrolledWins
+
+    -- Callbacks resolve the CURRENT roll object by id at click time, not the one captured now: a
+    -- restore and the DROP can both build a roll for the same lot (sync delta lands first), and the
+    -- banner keeps the first card (dedupe by key) while addon state moves to the newer object. The
+    -- popup path rebinds its reused frame for the same reason.
+    local rollId = roll.id
+    local function liveRoll()
+        return (self.live and self.live.rolls and self.live.rolls[rollId]) or roll
+    end
+
+    local item = {
+        key = rollId,
+        isOwner = roll.owner and true or nil,   -- the ML's card must never dismiss on repeat click
+        link = link,   -- ItemRender synthesizes item:id when uncached; fallbackName covers the text
+        fallbackName = roll.name,
+        icon = icon or "Interface\\Icons\\INV_Misc_QuestionMark",
+        quantity = roll.quantity or 1,
+        prio = (roll.prio and roll.prio ~= "") and roll.prio or nil,
+        rollDuration = roll.duration or ROLL_DURATION,
+        -- the card owns no clock: it asks per tick, and the answer tracks the CURRENT roll's
+        -- deadline, so a restore-guessed deadline self-corrects the moment the DROP lands
+        getTimeLeft = function()
+            local r = liveRoll()
+            if not r.deadline then return 0 end
+            return r.deadline - GetTime()
+        end,
+        disabled = disabled,
+        selected = mine and CARD_BRACKETS[mine] or nil,
+        getRollers = function()
+            local out = {}
+            for _, e in ipairs(self:ActiveRollers(rollId)) do
+                out[#out + 1] = { name = e.name, class = e.className, bracket = CARD_BRACKETS[e.tier] or e.tier }
+            end
+            return out
+        end,
+        onPick = function(label)
+            local tier = CARD_TIERS[label]
+            if tier then self:ChooseInterest(liveRoll(), tier) end
+        end,
+        onChosen = function(label)
+            -- the card dismissed itself (repeat click): a real bracket keeps the interest already
+            -- sent; Pass carries none, so dismissing it clears the local choice
+            local r = liveRoll()
+            if not r.owner and CARD_TIERS[label] == "pass" then r.choice = nil end
+        end,
+    }
+    if roll.owner then
+        item.onMLEnd = function() self:ResolveLiveRoll(rollId) end
+        item.onMLCancel = function() self:CancelLiveRoll(rollId) end
+        -- the popup's OnUpdate auto-resolves at the deadline; on a card that duty is onExpired
+        item.onExpired = function() self:ResolveLiveRoll(rollId) end
+    end
+    local accepted = self:AddRollBannerItem(item) and true or false
+    if accepted and not itemName then
+        -- cold cache: the same resolve ticker the popups use re-renders the card in place once
+        -- the item info arrives (the card went up with the bare item:id meanwhile)
+        self._bannerNamesPending = self._bannerNamesPending or {}
+        self._bannerNamesPending[rollId] = roll.itemId
+        self:EnsureNameTicker()
+    end
+    return accepted
+end
+
+-- ---------------------------------------------------------------------------
 -- interest popup
 -- ---------------------------------------------------------------------------
 function addon:ShowInterestPopup(roll, slot)
     if not roll.owner and self:ShouldSuppressRollPopup(roll) then
+        return
+    end
+    if self:ShowRollBannerCard(roll) then
+        -- the banner took the roll: drop any pending popup still holding this lot (the ML's
+        -- Start Roll frame would otherwise linger) and skip the interest popup entirely
+        for _, candidate in ipairs(self.live.active) do
+            if candidate.lotId == roll.id or candidate.rollId == roll.id then
+                closePopup(self, candidate)
+                break
+            end
+        end
+        compactPopups(self)
         return
     end
     -- Reuse-or-acquire: an existing popup tied to this lot id (either a pending popup
@@ -1253,17 +1360,16 @@ function addon:ShowInterestPopup(roll, slot)
     roll.popup = f
     f.mode = "interest"
     f.lotId = roll.id   -- keep both attributes consistent so the reuse lookup works either way
-    if f.resultHover then
-        f.resultHover:Hide()
-        f.resultHover:SetScript("OnEnter", nil)
-        f.resultHover:SetScript("OnLeave", nil)
-    end
 
     -- seed the local player's prior pick: a prefired loot-tab choice lives on the lot before the
     -- roll starts, so the popup opens with that bracket already highlighted (RefreshInterestPopup
     -- re-asserts it below from roll.choice).
     local mine = self:GetPlayerResponse(roll.id, util:GetPlayerName("player"))
     roll.choice = mine   -- includes "pass": a prior pass opens with the Pass button highlighted
+    -- Seed the Pass stance from the durable response (default is "pass"), so hideUnrolledWins treats
+    -- anything left on the default Pass as passed. Derived from stored state so it survives a
+    -- rebuild (duplicate DROP), a relog, or a prefire; a live bracket click updates it (ChooseInterest).
+    roll.passed = (mine == "pass")
     f.icon:SetTexture(roll.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = roll.link
     f.name:SetText(formatRollItemLabel(roll.link, roll.name, roll.quantity))
@@ -1356,7 +1462,12 @@ function addon:RefreshLiveRollCountForItem(lotId)
 end
 
 function addon:CloseInterestPopup(roll)
-    if roll and roll.popup then
+    if not roll then return end
+    -- one close path for both roll surfaces: every resolve/cancel/win site already calls this,
+    -- so the banner card (keyed by the same lot id) rides along for free
+    if self.CloseRollBannerCard then self:CloseRollBannerCard(roll.id) end
+    if self._bannerNamesPending then self._bannerNamesPending[roll.id] = nil end
+    if roll.popup then
         closePopup(self, roll.popup)
         roll.popup = nil
     end
@@ -1372,6 +1483,9 @@ function addon:ChooseInterest(roll, tier)
         self:Print("Your class cannot use that token. You may only pass.")
         return
     end
+    -- Track the local player's Pass stance for the hideUnrolledWins option: set on a pass, cleared by
+    -- any real bracket. Not cleared by the two-click dismiss below, so it survives to OnWinMessage.
+    roll.passed = (tier == "pass")
     self:SendInterest(roll.id, tier)
 
     -- Two-click dismiss, any bracket: the first click selects and highlights a bracket; a SECOND click
@@ -1381,7 +1495,6 @@ function addon:ChooseInterest(roll, tier)
     -- auto-hides: for the owner a repeat click just re-asserts the selection (no-op), it drives the roll.
     if not roll.owner and roll.choice == tier then
         if tier == "pass" then roll.choice = nil end
-        roll.dismissed = true   -- item-22: a resolve can reopen a result popup if showResultAfterHide is set
         self:CloseInterestPopup(roll)
         compactPopups(self)
         return
@@ -1404,11 +1517,6 @@ function addon:ShowPendingPopup(lot, slot)
 
     local f = acquirePopup(self)
     f.mode = "pending"
-    if f.resultHover then
-        f.resultHover:Hide()
-        f.resultHover:SetScript("OnEnter", nil)
-        f.resultHover:SetScript("OnLeave", nil)
-    end
     f:SetScript("OnUpdate", nil)        -- no countdown until the roll actually starts
     f.timer:Hide()
     f.lotId = lotId
@@ -1460,196 +1568,6 @@ function addon:ShowPendingPopup(lot, slot)
     f:SetScript("OnLeave", nil)
 
     addActivePopup(self, f, slot)        -- reuse a given slot (e.g. when a cancelled roll returns to pending)
-    f:Show()
-    layoutPopups(self)
-end
-
--- ---------------------------------------------------------------------------
--- result popup
--- ---------------------------------------------------------------------------
-function addon:ShowResultPopup(roll, winners, sections, slot)
-    if self:ShouldSuppressRollPopup(roll) then
-        return
-    end
-    local f = acquirePopup(self)
-    f.mode = "result"
-    f:SetScript("OnUpdate", nil)        -- no countdown on a result popup
-    f.timer:Hide()
-    f.icon:SetTexture(roll.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
-    f.itemLink = roll.link
-    f.name:SetText(formatRollItemLabel(roll.link, roll.name, roll.quantity))
-    self:TrackPopupItem(f, roll.itemId, roll.quantity)
-    f.count:Hide()
-    f.countHover:Hide()
-    if f.rollLines then
-        for _, line in ipairs(f.rollLines) do
-            line:Hide()
-        end
-    end
-    setPopupHeight(f, getCompactResultPopupHeight(f))
-
-    local myKey = util:NormalizeKey(util:GetPlayerName("player") or "")
-    local function displaySectionLabel(sectionLabel, member)
-        if member and member.isNamed then
-            return "LC Prio"
-        end
-        return sectionLabel or "?"
-    end
-
-    -- The core hands us `winners` as an ordered list of name strings; enrich each with its roll
-    -- and priority section from the breakdown so the popup can render the class-colored
-    -- "Winner: Name - roll - section" line.
-    local winnerList = {}
-    local winnerKeys = {}
-    for _, winnerName in ipairs(winners or {}) do
-        local winnerKey = util:NormalizeKey(winnerName)
-        winnerKeys[winnerKey] = true
-        local winnerSection, winnerRoll, winnerMember
-        for _, s in ipairs(sections or {}) do
-            for _, m in ipairs(s.members) do
-                if util:NormalizeKey(m.name) == winnerKey then
-                    winnerSection = displaySectionLabel(s.label, m)
-                    winnerRoll = m.roll
-                    winnerMember = m
-                    break
-                end
-            end
-            if winnerSection then break end
-        end
-        winnerList[#winnerList + 1] = {
-            name = winnerName,
-            roll = winnerRoll,
-            section = winnerSection,
-            isNamed = winnerMember and winnerMember.isNamed or false,
-            key = winnerKey,
-        }
-    end
-
-    local line
-    if #winnerList == 0 then
-        local namedRule = roll.name and self:GetNamedRule(roll.name)
-        if namedRule and namedRule.raw and namedRule.raw ~= "" then
-            line = "Winner: Loot Council Decision"
-        else
-            line = "Winner: No rollers."
-        end
-    else
-        local winnerParts = {}
-        for _, winner in ipairs(winnerList) do
-            local className = getPlayerClassName(self, winner.key)
-            winnerParts[#winnerParts + 1] = string.format("%s - %s - %s",
-                util:ColorPlayerName(winner.name, className),
-                tostring(winner.roll or "-"),
-                winner.section or "?")
-        end
-        local winnerLabel = #winnerParts > 1 and "Winners" or "Winner"
-        line = string.format("%s: %s", winnerLabel, table.concat(winnerParts, "; "))
-    end
-
-    -- TM consolation: if the local player rolled TM (transmog) on this item and didn't win, add a
-    -- hint to contact the winner(s). The TMer typically wants the appearance once the winner is
-    -- done with the item; surfacing the name here saves them digging into the roll breakdown.
-    if #winnerList > 0 and not winnerKeys[myKey] then
-        local rolledTm = false
-        for _, s in ipairs(sections or {}) do
-            if s.label == "TM" then
-                for _, m in ipairs(s.members) do
-                    if util:NormalizeKey(m.name) == myKey then
-                        rolledTm = true
-                        break
-                    end
-                end
-                break
-            end
-        end
-        if rolledTm then
-            local names = {}
-            for _, w in ipairs(winnerList) do
-                local className = getPlayerClassName(self, w.key)
-                names[#names + 1] = util:ColorPlayerName(w.name, className)
-            end
-            line = line .. "\nContact " .. table.concat(names, " or ") .. " to trade for your transmog"
-        end
-    end
-
-    f.sub:SetText(line)
-    setPopupHeight(f, getCompactResultPopupHeight(f))   -- recompute now that sub may be multi-line
-
-    f.bisBtn:Hide(); f.msBtn:Hide(); f.muBtn:Hide(); f.osBtn:Hide(); f.tmBtn:Hide(); f.passBtn:Hide(); f.rollBtn:Hide(); f.cancelBtn:Hide()
-    f.count:Hide()
-    f.okBtn:Show()
-    f.okBtn:ClearAllPoints()
-    f.okBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -8, -8)
-    f.okBtn:SetScript("OnClick", function() closePopup(self, f); compactPopups(self) end)
-
-    f.sections = sections
-    f.winnerKeys = winnerKeys
-    f.myKey = myKey
-    if not f.resultHover then
-        f.resultHover = CreateFrame("Frame", nil, f)
-        f.resultHover:EnableMouse(true)
-    end
-    f.resultHover:SetPoint("TOPLEFT", f.sub, "TOPLEFT", -2, 2)
-    f.resultHover:SetPoint("BOTTOMRIGHT", f.sub, "BOTTOMRIGHT", 2, -2)
-    f.resultHover:Show()
-    f.resultHover:SetScript("OnEnter", function(selfFrame)
-        anchorRollTooltip(f)
-        GameTooltip:ClearLines()
-        GameTooltip:AddLine("Rolls", 1, 0.82, 0)
-        for _, s in ipairs(f.sections or {}) do
-            if #s.members > 0 then
-                local mem = {}
-                for _, m in ipairs(s.members) do mem[#mem + 1] = m end
-                for _, m in ipairs(mem) do
-                    local key = util:NormalizeKey(m.name)
-                    local winnerType = displaySectionLabel(s.label, m)
-                    local className = getPlayerClassName(self, key)
-                    GameTooltip:AddLine(string.format("  %s - %s - %s", util:ColorPlayerName(m.name, className), tostring(m.roll or "-"), winnerType), 1, 1, 1)
-                end
-            end
-        end
-        GameTooltip:Show()
-    end)
-    f.resultHover:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    f:SetScript("OnEnter", nil)
-    f:SetScript("OnLeave", nil)
-
-    -- Auto-close governs the result popup's lifetime: only auto-hide when enabled (a 0 duration
-    -- closes it immediately on the next frame; a positive duration after that many seconds). When
-    -- disabled, the popup stays until the player clicks OK. The same bottom-bar countdown used by
-    -- the roll popup visualizes the remaining time so the player sees how long they have to look.
-    local opt = getOptions()
-    -- The ML keeps finished-loot popups open to examine the winners closely, overriding their own
-    -- auto-close. This is the loot master's own UI only; raiders always follow their personal setting.
-    local mlKeepOpen = opt.forceKeepResultPopup and self:IsAuthorizedLootMaster()
-    if opt.resultPopupAutoCloseEnabled and not mlKeepOpen then
-        local timeout = tonumber(opt.resultPopupAutoCloseSeconds) or 0
-        if timeout > 0 then
-            f.timer:Show()
-            f.timer:SetValue(1)
-            f.timer:SetStatusBarColor(0, 1, 0.1)
-            f.resultDeadline = GetTime() + timeout
-            f.resultDuration = timeout
-            f:SetScript("OnUpdate", function(selfFrame)
-                local remaining = selfFrame.resultDeadline - GetTime()
-                local frac = remaining / selfFrame.resultDuration
-                if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
-                selfFrame.timer:SetValue(frac)
-                selfFrame.timer:SetStatusBarColor(1 - frac, frac, 0.1)   -- green -> red as it drains
-                if remaining <= 0 then
-                    -- Timer is up: hide the bar and fade the popup out, then close. The countdown
-                    -- runs at full alpha so the bar stays readable until the very end.
-                    selfFrame.timer:Hide()
-                    beginResultFadeOut(self, selfFrame)
-                end
-            end)
-        else
-            -- timeout == 0: no hold and no bar, but still fade out instead of snapping shut.
-            beginResultFadeOut(self, f)
-        end
-    end
-
-    addActivePopup(self, f, slot)        -- reuse the interest popup's slot so it stays put
     f:Show()
     layoutPopups(self)
 end
@@ -1825,9 +1743,14 @@ function addon:ResolveLiveRoll(rollId)
     }, "RAID", nil, "ALERT")
     self:TriggerCallback("RESULTS_UPDATED")
 
-    local slot = roll.popup and roll.popup.slot
     self:CloseInterestPopup(roll)
-    self:ShowResultPopup(roll, winners, sections, slot)
+    if #winners > 0 then
+        self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))
+    else
+        -- No one rolled: the ML still gets a win card (so the drop is not silently gone) that says as
+        -- much and offers an immediate reroll. Raiders get no card for a no-winner resolve.
+        self:AddLootBannerItem(self:BannerNoWinnerItem(roll))
+    end
     self.live.rolls[rollId] = nil   -- live-roll UI done; the core holds the truth
 
     if #winners == 0 then
@@ -1841,8 +1764,9 @@ end
 
 -- Group a result record's rollers by bracket into the popup's section format
 -- ({label, members={{name, roll}}}), highest bracket first, for the result popup breakdown.
-local SECTION_ORDER = { "bis", "ms", "mu", "os", "tm" }
-local SECTION_LABELS = { bis = "BiS", ms = "MS", mu = "MU", os = "OS", tm = "TM" }
+-- Passers don't get a result section, so this is the win-tier order; labels from the shared map.
+local SECTION_ORDER = util.WinTiers
+local SECTION_LABELS = util.BracketLabels
 local function sectionMemberSortValue(member)
     if member.auto or member.rollText == "AUTO" then
         return 101
@@ -1878,6 +1802,75 @@ function addon:SectionsFromResult(record)
         end
     end
     return sections
+end
+
+-- Build a loot-banner item (link/icon/winner/why/full roll list) from a resolved roll, for
+-- addon:AddLootBannerItem. This is the win display that replaces the old result popup. The winner's
+-- "why" is their own roll + bracket; rolls is every responder, class-colored on the row tooltip.
+function addon:BannerItemFromResult(roll, winners, sections)
+    local rolls = {}
+    for _, s in ipairs(sections or {}) do
+        for _, m in ipairs(s.members) do
+            rolls[#rolls + 1] = {
+                name = m.name,
+                class = getPlayerClassName(self, util:NormalizeKey(m.name)),
+                roll = m.roll,
+                section = m.isNamed and "LC Prio" or s.label,
+            }
+        end
+    end
+
+    -- One winner entry per awarded copy, each enriched with their roll + bracket from the breakdown so a
+    -- multi-copy drop shows every winner. winner/winnerClass/why mirror the first for single-winner use.
+    local winnerList = {}
+    for _, wname in ipairs(winners or {}) do
+        local wkey = util:NormalizeKey(wname)
+        local section, roll
+        for _, r in ipairs(rolls) do
+            if util:NormalizeKey(r.name) == wkey then
+                section, roll = r.section, r.roll
+                break
+            end
+        end
+        winnerList[#winnerList + 1] = {
+            name = wname,
+            class = getPlayerClassName(self, wkey),
+            section = section,
+            roll = roll,
+        }
+    end
+
+    local first = winnerList[1]
+    local why = first and (first.roll and string.format("roll %s - %s", tostring(first.roll), first.section or "?") or first.section)
+
+    return {
+        key = roll.id,
+        link = roll.link,
+        icon = roll.icon,
+        quantity = roll.quantity,
+        winner = first and first.name,
+        winnerClass = first and first.class,
+        why = why,
+        winners = winnerList,
+        rolls = rolls,
+    }
+end
+
+-- A no-winner win card for the loot master: shows the item with a "no one rolled" line and a reroll
+-- button. Reroll = unlock the resolved lot (back to rollable) then start a fresh roll, the same two
+-- steps the ML does by hand via Unlock Roll + Start. ML-only (built only on the resolving client).
+function addon:BannerNoWinnerItem(roll)
+    local lotId = roll.id
+    return {
+        key = lotId,
+        link = roll.link,
+        icon = roll.icon,
+        quantity = roll.quantity,
+        noWinner = true,
+        onReroll = function()
+            if self:UnlockSessionRoll(lotId) then self:StartLiveRoll(lotId) end
+        end,
+    }
 end
 
 -- pack sections for WIN: "label~name=roll,name=roll" joined by ";"
@@ -1964,6 +1957,14 @@ function addon:OnDropMessage(fields)
     if lot and (lot.removed or coreState == core.STATE.RESOLVED) then
         return
     end
+    -- We already awarded this lot but the core mirror still lags in ROLLING (its RESOLVED delta
+    -- trails the WIN): a retransmitted/late DROP would otherwise rebuild a fresh unresolved roll and
+    -- resurrect a zombie card for an item already won. OnWinMessage keeps the resolved roll on
+    -- purpose so this guard can see it.
+    local existing = self.live.rolls[lotId]
+    if existing and existing.resolved then
+        return
+    end
 
     local name, link, icon = util:ItemRender(itemId)
     local roll = {
@@ -2003,16 +2004,18 @@ function addon:OnWinMessage(fields)
         if w ~= "" then winners[#winners + 1] = w end
     end
 
-    -- Do NOT auto-hide a won item. If the player still has the dialog open, convert it to a
-    -- result popup they must OK to dismiss. If they already dismissed it (passed or two-click
-    -- dismissed), leave it gone -- UNLESS they opted into seeing the final roll after hiding
-    -- (item 22), in which case reopen a result popup so they still learn the winner.
-    if roll.popup then
+    -- Raid-wide win display: every raider who receives the WIN gets the loot banner, regardless of
+    -- whether they still had the interest popup open or already dismissed it. Close any lingering
+    -- roll surface first (popup or banner card) so it does not sit behind the win.
+    self:CloseInterestPopup(roll)
+    -- Opt-out: with hideUnrolledWins on, a raider only sees win banners for loot they actually rolled
+    -- on. That means suppressing the result when they passed (roll.passed, default Pass included) OR
+    -- when their own filters would have hidden the roll prompt in the first place (white/black list,
+    -- hide-unusable) -- evaluated live so a filtered item is caught even if no roll surface opened.
+    -- Off by default; the ML always sees results (its own resolve path is ungated).
+    local suppressed = getOptions().hideUnrolledWins and (roll.passed or self:ShouldSuppressRollPopup(roll))
+    if #winners > 0 and not suppressed then
         local sections = self:DecodeSections(sectionsText)
-        local slot = roll.popup.slot
-        self:CloseInterestPopup(roll)
-        self:ShowResultPopup(roll, winners, sections, slot)
-    elseif roll.dismissed and getOptions().showResultAfterHide then
-        self:ShowResultPopup(roll, winners, self:DecodeSections(sectionsText))
+        self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))
     end
 end

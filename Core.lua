@@ -183,7 +183,7 @@ function addon:PLAYER_LOGIN()
             resultPopupAutoCloseSeconds = 10,
             forceKeepResultPopup = true,   -- LM only: finished-loot winner popups stay open for the
                                            -- whole raid, overriding each player's own auto-close setting.
-            rollDuration = 40,
+            rollDuration = 30,
             rollBatchSize = 5,
             autoStartRoll = true,  -- LM only; mutex with db.autoRoll and autoSkipRoll. New loot
                                     -- broadcasts the DROP immediately (NEW -> ROLLING, no popup gate).
@@ -191,9 +191,9 @@ function addon:PLAYER_LOGIN()
                                     -- moves straight to SKIPPED (auto-resurfaces on the next scan).
             hideUnusableRolls = false,   -- raider opt-in: hide roll popups for items your CLASS can't use
                                          -- (armor/weapon proficiency only; unique-owned/quest-done still show)
-            showResultAfterHide = false, -- raider opt-in: after you dismiss a roll popup (pass or the
-                                         -- two-click bracket dismiss), reopen a result popup on resolve
-                                         -- so you still see who won. Off by default (some want silence).
+            hideUnrolledWins = false,    -- raider opt-in: suppress the win banner for loot you did not roll
+                                         -- on -- items you passed on, or whose roll prompt your white/black
+                                         -- list or hide-unusable filter hid. Off by default.
             whitelistEnabled = false,
             whitelistText = "",
             blacklistEnabled = false,
@@ -204,6 +204,10 @@ function addon:PLAYER_LOGIN()
             minimapButtonAngle = 200,
             rollResultTooltipAnchor = "RIGHT",   -- where roll-popup hover tooltips dock: RIGHT/LEFT/TOP/BOTTOM/CURSOR
             explanationTooltipsEnabled = true,   -- hover tooltips that spell things out (e.g. the roll brackets, popup + loot tab)
+            bannerMinimal = true,                -- loot banner look: minimalist (per-card badge, no chrome) vs full; minimal is the default
+            bannerInstant = false,               -- loot banner animations: snappy (instant) vs smooth
+            bannerMLSide = "RIGHT",              -- which card edge the ML roll controls (End/Cancel) hang off: RIGHT/LEFT
+            bannerLocked = false,                -- lock the loot banner in place (drag disabled)
         },
         ui = {
             selectedTab = "loot",

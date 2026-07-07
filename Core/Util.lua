@@ -660,6 +660,22 @@ end
 local ROLL_TIERS = { "bis", "ms", "mu", "os", "tm", "pass" }
 local NONEQUIP_TIERS = { ms = true, os = true, pass = true }   -- reduced-roll items get MS/OS(greed)/Pass
 
+-- Single source of truth for the roll brackets shared across the roll popup, banner cards, loot tab,
+-- result sections and the resolver. Every consumer derives its own view (label map, rank, per-tier
+-- widths, pass-excluded order) from these instead of re-listing the tiers, so the set can never drift.
+-- The compact "TM" here is deliberate; the hover lists use a spelled-out "Tmog" (RESPONSE_LABELS in
+-- LiveRoll), the one intentional label variant.
+util.RollTiers = ROLL_TIERS                              -- ordered tier keys, highest bracket first
+util.BracketLabels = { bis = "BiS", ms = "MS", mu = "MU", os = "OS", tm = "TM", pass = "Pass" }
+util.RollTierRank = {}                                   -- tier key -> 1..N position (bis = 1 .. pass = 6)
+util.BracketRank = {}                                    -- label -> rank, for surfaces that carry the display label
+util.WinTiers = {}                                       -- tier order minus pass (passers never win / get a section)
+for i, key in ipairs(ROLL_TIERS) do
+    util.RollTierRank[key] = i
+    util.BracketRank[util.BracketLabels[key]] = i
+    if key ~= "pass" then util.WinTiers[#util.WinTiers + 1] = key end
+end
+
 -- Single source of truth for which roll brackets (BiS/MS/MU/OS/TM/Pass) an item offers, so the roll
 -- popup and the loot tab (mirrors of each other) never drift. They differ only in how they render the
 -- result. Returns a map bracket -> disable reason ("locked" / "quest" / "unique" / "type" / "class" /
