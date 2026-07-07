@@ -60,8 +60,75 @@ function UI.createPresetManager(panel, kind, anchorCB, opts)
     local box = createMultilineEditScroll(panel, 420, 110)
     box:SetPoint("TOPLEFT", boxAnchor, "BOTTOMLEFT", boxX, boxY)
     box.editBox:SetText(getOptions(addon)[textField] or "")
+
+    -- Collapsible editor (opts.expand): idle, the list shows a one-line preview and the tall edit box
+    -- is hidden; clicking the preview blooms the box to opts.expand size, raised over its neighbours on
+    -- an opaque backing, and it collapses when the box loses focus. Keeps the Options tab compact.
+    local updatePreview, collapse
+    if opts.expand then
+        local ex = opts.expand
+        local preview = CreateFrame("Button", nil, panel)
+        elevateInteractiveFrame(preview, panel, 6)
+        preview:SetWidth(420)
+        preview:SetHeight(20)
+        preview:SetPoint("TOPLEFT", boxAnchor, "BOTTOMLEFT", boxX, boxY)
+        preview:SetBackdrop({
+            bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 8,
+            insets = { left = 3, right = 3, top = 3, bottom = 3 },
+        })
+        preview:SetBackdropColor(0, 0, 0, 0.35)
+        preview:SetBackdropBorderColor(0.42, 0.34, 0.18, 0.8)
+        local previewText = preview:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        previewText:SetPoint("LEFT", preview, "LEFT", 8, 0)
+        previewText:SetPoint("RIGHT", preview, "RIGHT", -8, 0)
+        previewText:SetJustifyH("LEFT")
+
+        updatePreview = function()
+            local text = getOptions(addon)[textField] or ""
+            local shown, n = {}, 0
+            for line in text:gmatch("[^\r\n]+") do
+                local t = line:gsub("^%s*(.-)%s*$", "%1")
+                if t ~= "" then n = n + 1; if #shown < 3 then shown[#shown + 1] = t end end
+            end
+            if n == 0 then
+                previewText:SetText("|cff8a8168(empty) - click to add items|r")
+            else
+                previewText:SetText(("|cffddd3c0%s%s|r  |cff8a8168%d item%s, click to edit|r"):format(
+                    table.concat(shown, ", "), n > #shown and "..." or "", n, n == 1 and "" or "s"))
+            end
+        end
+
+        collapse = function()
+            box:Hide()
+            preview:Show()
+        end
+        local function expand()
+            preview:Hide()
+            box:ClearAllPoints()
+            box:SetPoint(ex.point or "TOPLEFT", ex.anchor or panel, ex.relPoint or "TOPLEFT", ex.x or 0, ex.y or 0)
+            box:SetSize(ex.width, ex.height)
+            box.editBox:SetWidth(ex.width - 36)
+            box.editBox:SetHeight(ex.height - 12)
+            local lvl = (panel:GetFrameLevel() or 0) + 40   -- above the sibling controls it covers
+            box:SetFrameLevel(lvl)
+            box.scroll:SetFrameLevel(lvl + 1)
+            box.editBox:SetFrameLevel(lvl + 2)
+            box:SetBackdropColor(0.05, 0.04, 0.02, 1)       -- opaque so neighbours do not bleed through
+            box:Show()
+            box.editBox:SetFocus()
+        end
+
+        preview:SetScript("OnClick", expand)
+        box:Hide()          -- start collapsed
+        updatePreview()
+        box.preview = preview
+    end
+
     box.editBox:SetScript("OnEditFocusLost", function(selfBox)
         addon:SetItemFilterText(kind, selfBox:GetText())
+        if updatePreview then updatePreview() end
+        if collapse then collapse() end
     end)
 
     -- Show a preset name in the dropdown and set the delete button for it WITHOUT touching the items;
@@ -87,6 +154,7 @@ function UI.createPresetManager(panel, kind, anchorCB, opts)
         if not preset then
             showSelectedPreset(nil)
             getOptions(addon)[nameField] = nil
+            if updatePreview then updatePreview() end
             return
         end
         box.editBox:SetText(preset.text or "")
@@ -96,6 +164,7 @@ function UI.createPresetManager(panel, kind, anchorCB, opts)
         local chosen = preset.isNone and nil or preset.name
         getOptions(addon)[nameField] = chosen
         showSelectedPreset(chosen)
+        if updatePreview then updatePreview() end
     end
 
     local function initDropdown()

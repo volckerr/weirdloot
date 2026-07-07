@@ -30,7 +30,7 @@ function addon:BuildOptionsTab()
     local panel = CreateFrame("Frame", nil, scroll)
     elevateInteractiveFrame(panel, scroll, 1)
     panel:SetWidth(920)
-    panel:SetHeight(1130)   -- includes the Loot Banner display section (header + 4 rows) before whitelist
+    panel:SetHeight(720)   -- two columns + full-width filters; slack lets a bloomed list editor scroll into view
     scroll:SetScrollChild(panel)
     scroll:EnableMouseWheel(true)
     scroll:SetScript("OnMouseWheel", function(selfFrame, delta)
@@ -55,6 +55,50 @@ function addon:BuildOptionsTab()
     titleDivider:SetHeight(1)
     titleDivider:SetPoint("TOPLEFT", panel.title, "BOTTOMLEFT", 0, -4)
     titleDivider:SetPoint("RIGHT", panel, "RIGHT", -40, 0)
+
+    -- Two-column layout: left column = General + Loot Banner (per-raider display), right column =
+    -- Loot Master; Loot Filters spans full width below. RCOL_X starts the right column; the divider
+    -- right-edge offsets keep each column's rule within its own column.
+    local RCOL_X = 476
+    local LCOL_DIV_R, FULL_DIV_R = -468, -36   -- divider RIGHT offset from panel RIGHT (left col / full width)
+
+    -- Section header + gold divider, one source so General/Filters/Banner/Master never drift. Caller
+    -- positions the header and sets the divider's right edge (columns differ).
+    local function makeSectionHeader(text)
+        local h = createLabel(panel, text, "TOPLEFT", panel, "TOPLEFT", 0, 0)
+        h:SetFontObject(GameFontHighlightLarge)
+        h:SetTextColor(1, 0.82, 0)
+        local d = panel:CreateTexture(nil, "ARTWORK")
+        d:SetTexture("Interface\\Buttons\\WHITE8x8")
+        d:SetVertexColor(0.5, 0.4, 0.1, 0.6)
+        d:SetHeight(1)
+        d:SetPoint("TOPLEFT", h, "BOTTOMLEFT", 0, -4)
+        return h, d
+    end
+    local generalHeader, generalDivider = makeSectionHeader("General")
+    local bannerHeader, bannerDivider = makeSectionHeader("Loot Banner")
+    local lmHeader, lmDivider = makeSectionHeader("Loot Master")
+    local filtersHeader, filtersDivider = makeSectionHeader("Loot Filters")
+
+    -- The white/black list editors bloom to fill this region (raised over their neighbours) on focus.
+    local listsRegion = CreateFrame("Frame", nil, panel)
+    local LIST_EXPAND = { anchor = listsRegion, point = "TOPLEFT", relPoint = "TOPLEFT", x = 0, y = 0, width = 880, height = 180 }
+
+    -- Filter warning: rides the Loot Filters header, red, and only appears while a list is actually
+    -- enabled (they are mutually exclusive), spelling out what that list hides.
+    local filterWarning = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+    filterWarning:SetPoint("LEFT", filtersHeader, "RIGHT", 14, 0)
+    filterWarning:SetTextColor(1, 0.19, 0.19)
+    local function updateFilterWarning()
+        local o = getOptions(addon)
+        if o.whitelistEnabled then
+            filterWarning:SetText("Warning: you will ONLY see loot for items on the White List")
+        elseif o.blacklistEnabled then
+            filterWarning:SetText("Warning: you will ONLY see loot for items NOT on the Black List")
+        else
+            filterWarning:SetText("")
+        end
+    end
 
     -- Winner banner hold time (the finished-loot toast; still keyed resultPopupAutoClose* for compat)
     local autoCloseCB = createOptionsCheckbox(panel, "Auto-hide the winner banner after")
@@ -87,20 +131,8 @@ function addon:BuildOptionsTab()
     end)
     applyAutoCloseColor()
 
-    -- ============================================================
-    -- Loot Master Options (anchored to the BOTTOM of the panel, after the blacklist box)
-    -- ============================================================
-    local lmHeader = createLabel(panel, "Loot Master Options", "TOPLEFT", panel, "TOPLEFT", 12, 0)
-    lmHeader:SetFontObject(GameFontHighlightLarge)
-    lmHeader:SetTextColor(1, 0.82, 0)
-
-    local lmDivider = panel:CreateTexture(nil, "ARTWORK")
-    lmDivider:SetTexture("Interface\\Buttons\\WHITE8x8")
-    lmDivider:SetVertexColor(0.5, 0.4, 0.1, 0.6)
-    lmDivider:SetHeight(1)
-    lmDivider:SetPoint("TOPLEFT", lmHeader, "BOTTOMLEFT", 0, -4)
-    lmDivider:SetPoint("RIGHT", panel, "RIGHT", -40, 0)
-
+    -- Loot Master block (right column; lmHeader/lmDivider are created up top). These widgets keep their
+    -- own top-down chain rooted at lmDivider, so positioning lmHeader lands the whole block.
     -- Keep finished-loot winner popups open on the ML's screen so they can study the winners,
     -- ignoring the ML's own auto-close. ML-only: raiders always follow their personal setting.
     local keepResultCB = createOptionsCheckbox(panel, "Never auto-hide your own winner banners")
@@ -126,7 +158,7 @@ function addon:BuildOptionsTab()
     end)
 
     -- Start Rolls batch size (loot master)
-    local batchLabel = createLabel(panel, "Start Rolls batch size (items rolled at once):",
+    local batchLabel = createLabel(panel, "Start Rolls batch size:",
         "TOPLEFT", rollDurLabel, "BOTTOMLEFT", 0, -20)
     local batchBox = createNumberEditBox(panel, 50)
     batchBox:SetPoint("LEFT", batchLabel, "RIGHT", 12, 0)
@@ -143,15 +175,15 @@ function addon:BuildOptionsTab()
     -- Three mutex auto-modes for new loot. Mirrors the slash commands /wl autoroll, /wl autostart,
     -- /wl autoskip. Picking one forces the other two off; all three off means the LM drives every
     -- roll manually from the Loot tab.
-    local autoRollCB = createOptionsCheckbox(panel, "Auto-open the pending Start/Skip popup when new loot lands in bags")
+    local autoRollCB = createOptionsCheckbox(panel, "Auto-open the Start/Skip popup on new loot")
     autoRollCB:SetPoint("TOPLEFT", batchLabel, "BOTTOMLEFT", 0, -16)
     autoRollCB:SetChecked(self.db.autoRoll == true)
 
-    local autoStartCB = createOptionsCheckbox(panel, "Auto-start rolls when loot lands in bags (popups start already rolling)")
+    local autoStartCB = createOptionsCheckbox(panel, "Auto-start rolls when loot lands")
     autoStartCB:SetPoint("TOPLEFT", autoRollCB, "BOTTOMLEFT", 0, -8)
     autoStartCB:SetChecked(opt.autoStartRoll and true or false)
 
-    local autoSkipCB = createOptionsCheckbox(panel, "Auto-skip a live roll when new loot lands in bags")
+    local autoSkipCB = createOptionsCheckbox(panel, "Auto-skip a live roll on new loot")
     autoSkipCB:SetPoint("TOPLEFT", autoStartCB, "BOTTOMLEFT", 0, -8)
     autoSkipCB:SetChecked(opt.autoSkipRoll and true or false)
 
@@ -175,7 +207,7 @@ function addon:BuildOptionsTab()
 
     -- Designated disenchanter (loot master). Mirrors /wl deer <name>. Non-epic BoE items
     -- routed through Master Loot go to this player's bags via GiveMasterLoot.
-    local deerLabel = createLabel(panel, "Designated disenchanter (non-epic BoE auto-routes here):",
+    local deerLabel = createLabel(panel, "Designated disenchanter:",
         "TOPLEFT", autoSkipCB, "BOTTOMLEFT", 0, -16)
     local deerBox = createTextEditBox(panel, 160)
     deerBox:SetPoint("LEFT", deerLabel, "RIGHT", 12, 0)
@@ -218,15 +250,15 @@ function addon:BuildOptionsTab()
     end)
 
     -- Whitelist
-    local whitelistCB = createOptionsCheckbox(panel, "Enable White List |cffff3030(Warning: You will ONLY see loot popups for items on this list)|r")
+    local whitelistCB = createOptionsCheckbox(panel, "Enable White List")
     whitelistCB:SetPoint("TOPLEFT", hideUnusableCB, "BOTTOMLEFT", 0, -24)   -- overridden in the final layout pass
     whitelistCB:SetChecked(opt.whitelistEnabled and true or false)
     -- OnClick is wired below via bindExclusiveCheckboxes, once blacklistCB also exists (mutually exclusive).
 
-    local whitelistBox = createPresetManager(panel, "whitelist", whitelistCB)
+    local whitelistBox = createPresetManager(panel, "whitelist", whitelistCB, { expand = LIST_EXPAND })
 
     -- Blacklist
-    local blacklistCB = createOptionsCheckbox(panel, "Enable Black List |cffff3030(Warning: you will ONLY see loot popups for items NOT on this list)|r")
+    local blacklistCB = createOptionsCheckbox(panel, "Enable Black List")
     blacklistCB:SetPoint("TOP", whitelistBox, "BOTTOM", 0, -16)
     blacklistCB:SetPoint("LEFT", panel, "LEFT", 12, 0)
     blacklistCB:SetChecked(opt.blacklistEnabled and true or false)
@@ -235,14 +267,14 @@ function addon:BuildOptionsTab()
     -- list contradict, so wire the pair as an exclusive group now that both checkboxes exist.
     bindExclusiveCheckboxes({
         { cb = whitelistCB, get = function() return getOptions(addon).whitelistEnabled end,
-          set = function(on) getOptions(addon).whitelistEnabled = on end },
+          set = function(on) getOptions(addon).whitelistEnabled = on end,
+          onToggle = function() updateFilterWarning() end },
         { cb = blacklistCB, get = function() return getOptions(addon).blacklistEnabled end,
-          set = function(on) getOptions(addon).blacklistEnabled = on end },
+          set = function(on) getOptions(addon).blacklistEnabled = on end,
+          onToggle = function() updateFilterWarning() end },
     })
 
-    local blacklistBox = createPresetManager(panel, "blacklist", blacklistCB, {
-        note = "Curated presets are shown below, select CLASS to see main and offspec pieces, or SPEC to see only items useful for that spec.",
-    })
+    local blacklistBox = createPresetManager(panel, "blacklist", blacklistCB, { expand = LIST_EXPAND })
 
     -- Minimap button visibility -- sits above the whitelist section (re-anchored below to land
     -- above whitelistCB once that widget exists; see the re-anchor after explanationTipsCB).
@@ -257,7 +289,7 @@ function addon:BuildOptionsTab()
 
     -- Roll result tooltip docking: where the result/roller hover tooltips appear relative to the
     -- popup. Defaults to the right of the popup; configurable since that can be wrong for some UIs.
-    local anchorLabel = createLabel(panel, "Roll result tooltip docking:", "TOPLEFT", minimapCB, "BOTTOMLEFT", 0, -22)
+    local anchorLabel = createLabel(panel, "Roller preview tooltip docking:", "TOPLEFT", minimapCB, "BOTTOMLEFT", 0, -22)
     local ANCHOR_OPTIONS = {
         { value = "RIGHT",  text = "Right of popup" },
         { value = "LEFT",   text = "Left of popup" },
@@ -294,20 +326,8 @@ function addon:BuildOptionsTab()
     end)
     UIDropDownMenu_SetText(anchorDrop, anchorText(opt.rollResultTooltipAnchor or "RIGHT"))
 
-    -- ============================================================
-    -- Loot Banner (display) -- the roll cards + winner toast. Section header, then the look toggles
-    -- and the position controls. Anchored into the chain in the final layout pass below.
-    -- ============================================================
-    local bannerHeader = createLabel(panel, "Loot Banner", "TOPLEFT", panel, "TOPLEFT", 12, 0)
-    bannerHeader:SetFontObject(GameFontHighlightLarge)
-    bannerHeader:SetTextColor(1, 0.82, 0)
-    local bannerDivider = panel:CreateTexture(nil, "ARTWORK")
-    bannerDivider:SetTexture("Interface\\Buttons\\WHITE8x8")
-    bannerDivider:SetVertexColor(0.5, 0.4, 0.1, 0.6)
-    bannerDivider:SetHeight(1)
-    bannerDivider:SetPoint("TOPLEFT", bannerHeader, "BOTTOMLEFT", 0, -4)
-    bannerDivider:SetPoint("RIGHT", panel, "RIGHT", -40, 0)
-
+    -- Loot Banner (display) block: the look toggles + position controls. bannerHeader/bannerDivider are
+    -- created up top; these widgets are positioned in the final layout pass (left column).
     local bannerMinimalCB = createOptionsCheckbox(panel, "Minimalist look (per-card badge, no banner chrome)")
     bannerMinimalCB:SetChecked(opt.bannerMinimal and true or false)
     bannerMinimalCB:SetScript("OnClick", function(selfCB)
@@ -340,52 +360,70 @@ function addon:BuildOptionsTab()
     end)
 
     -- ============================================================
-    -- Final layout pass: positions widgets in the user-facing order
-    -- regardless of the creation order above. Anchor chain (top -> bottom):
-    --   Options title (already anchored to panel)
-    --   autoCloseCB
-    --   explanationTipsCB
-    --   hideUnusableCB             (Hide rolls my class can't use)
-    --   hideUnrolledWinsCB         (Don't show winners for loot I passed on or filtered out)
-    --   anchorLabel + anchorDrop   (Roll result tooltip docking)
-    --   minimapCB
-    --   whitelistCB ... whitelistBox
-    --   blacklistCB ... blacklistBox
-    --   lmHeader + lmDivider       (Loot Master Options)
-    --   rollDurLabel + batchLabel + autoRollCB + autoSkipCB + deerLabel
-    -- The LM-section widgets keep their internal anchor chain; only the
-    -- top-level lmHeader anchor moves so the whole block lands at the bottom.
+    -- Final layout pass: two columns. Left = General + Loot Banner (per-raider display); right = Loot
+    -- Master; Loot Filters spans the full width below, its two list editors side by side. Section
+    -- headers/dividers are created up top; here each is positioned and its divider right-edge set.
     -- ============================================================
-    explanationTipsCB:ClearAllPoints()
-    explanationTipsCB:SetPoint("TOPLEFT", autoCloseCB, "BOTTOMLEFT", 0, -20)
-
-    hideUnusableCB:ClearAllPoints()
-    hideUnusableCB:SetPoint("TOPLEFT", explanationTipsCB, "BOTTOMLEFT", 0, -20)
-
-    hideUnrolledWinsCB:ClearAllPoints()
-    hideUnrolledWinsCB:SetPoint("TOPLEFT", hideUnusableCB, "BOTTOMLEFT", 0, -20)
-
-    anchorLabel:ClearAllPoints()
-    anchorLabel:SetPoint("TOPLEFT", hideUnrolledWinsCB, "BOTTOMLEFT", 0, -22)
-
+    -- LEFT COLUMN: General
+    generalHeader:ClearAllPoints()
+    generalHeader:SetPoint("TOPLEFT", titleDivider, "BOTTOMLEFT", 0, -14)
+    generalDivider:SetPoint("RIGHT", panel, "RIGHT", LCOL_DIV_R, 0)
     minimapCB:ClearAllPoints()
-    minimapCB:SetPoint("TOPLEFT", anchorLabel, "BOTTOMLEFT", 0, -22)
+    minimapCB:SetPoint("TOPLEFT", generalDivider, "BOTTOMLEFT", 0, -12)
+    explanationTipsCB:ClearAllPoints()
+    explanationTipsCB:SetPoint("TOPLEFT", minimapCB, "BOTTOMLEFT", 0, -8)
 
-    -- Loot Banner section between the display options and the filter lists
+    -- LEFT COLUMN: Loot Banner
     bannerHeader:ClearAllPoints()
-    bannerHeader:SetPoint("TOPLEFT", minimapCB, "BOTTOMLEFT", 0, -24)
+    bannerHeader:SetPoint("TOPLEFT", explanationTipsCB, "BOTTOMLEFT", 0, -22)
+    bannerDivider:SetPoint("RIGHT", panel, "RIGHT", LCOL_DIV_R, 0)
+    bannerMinimalCB:ClearAllPoints()
     bannerMinimalCB:SetPoint("TOPLEFT", bannerDivider, "BOTTOMLEFT", 0, -12)
+    bannerInstantCB:ClearAllPoints()
     bannerInstantCB:SetPoint("TOPLEFT", bannerMinimalCB, "BOTTOMLEFT", 0, -8)
-    bannerMLSideCB:SetPoint("TOPLEFT", bannerInstantCB, "BOTTOMLEFT", 0, -8)
-    bannerLockCB:SetPoint("TOPLEFT", bannerMLSideCB, "BOTTOMLEFT", 0, -8)
+    autoCloseCB:ClearAllPoints()
+    autoCloseCB:SetPoint("TOPLEFT", bannerInstantCB, "BOTTOMLEFT", 0, -8)
+    anchorLabel:ClearAllPoints()
+    anchorLabel:SetPoint("TOPLEFT", autoCloseCB, "BOTTOMLEFT", 0, -14)
+    bannerLockCB:ClearAllPoints()
+    bannerLockCB:SetPoint("TOPLEFT", anchorLabel, "BOTTOMLEFT", 0, -12)
+    resetPosBtn:ClearAllPoints()
     resetPosBtn:SetPoint("LEFT", bannerLockCB.label or bannerLockCB, "RIGHT", 16, 0)
 
-    whitelistCB:ClearAllPoints()
-    whitelistCB:SetPoint("TOPLEFT", bannerLockCB, "BOTTOMLEFT", 0, -22)
-
+    -- RIGHT COLUMN: Loot Master. keepResultCB already roots to lmDivider (its x follows lmHeader);
+    -- insert MLside after it, then reroot the roll-mechanics chain onto MLside.
     lmHeader:ClearAllPoints()
-    lmHeader:SetPoint("TOP", blacklistBox, "BOTTOM", 0, -28)
-    lmHeader:SetPoint("LEFT", panel, "LEFT", 12, 0)
+    lmHeader:SetPoint("TOPLEFT", generalHeader, "TOPLEFT", RCOL_X - 12, 0)   -- same top as the left column, in the right column
+    lmDivider:SetPoint("RIGHT", panel, "RIGHT", FULL_DIV_R, 0)
+    bannerMLSideCB:ClearAllPoints()
+    bannerMLSideCB:SetPoint("TOPLEFT", keepResultCB, "BOTTOMLEFT", 0, -12)
+    rollDurLabel:ClearAllPoints()
+    rollDurLabel:SetPoint("TOPLEFT", bannerMLSideCB, "BOTTOMLEFT", 0, -14)
+
+    -- LOOT FILTERS: full width, below the taller (right) column. Nudge the -26 if a column grows.
+    -- Full width below the taller (right) column: anchor to its last widget (deerLabel) and pull x back
+    -- to the left margin, so the gap tracks the real column height instead of a guessed offset.
+    filtersHeader:ClearAllPoints()
+    filtersHeader:SetPoint("TOPLEFT", deerLabel, "BOTTOMLEFT", -(RCOL_X - 12), -24)
+    filtersDivider:SetPoint("RIGHT", panel, "RIGHT", FULL_DIV_R, 0)
+
+    hideUnusableCB:ClearAllPoints()
+    hideUnusableCB:SetPoint("TOPLEFT", filtersDivider, "BOTTOMLEFT", 0, -12)
+    hideUnrolledWinsCB:ClearAllPoints()
+    hideUnrolledWinsCB:SetPoint("TOPLEFT", hideUnusableCB, "TOPLEFT", RCOL_X - 12, 0)   -- right half, same row
+
+    -- White List (left) and Black List (right), side by side; each editor collapses to one line.
+    whitelistCB:ClearAllPoints()
+    whitelistCB:SetPoint("TOPLEFT", hideUnusableCB, "BOTTOMLEFT", 0, -16)
+    blacklistCB:ClearAllPoints()
+    blacklistCB:SetPoint("TOPLEFT", whitelistCB, "TOPLEFT", RCOL_X - 12, 0)   -- right half, same row
+
+    -- The region both editors bloom into (full width, rooted at the collapsed preview row).
+    listsRegion:ClearAllPoints()
+    listsRegion:SetPoint("TOPLEFT", whitelistCB, "BOTTOMLEFT", 4, -44)
+    listsRegion:SetSize(880, 180)
+
+    updateFilterWarning()   -- reflect the saved white/black-list state on open
 
     panel.autoCloseCB = autoCloseCB
     panel.autoCloseSeconds = autoCloseSeconds
