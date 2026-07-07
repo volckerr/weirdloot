@@ -23,22 +23,33 @@ local BB_EXPAND_TIME = 0.25         -- time to expand per item
 local WON_ROW_H = 44                -- win card: icon + name + winner line
 local DROP_ROW_H = 62               -- roll card is taller: name + prio line + bracket buttons
 local ROW_GAP = 2                   -- vertical gap between stacked rows
-local BB_MAX_LOOT = 8
 local BADGE_SIZE = 20               -- minimalist per-card badge (dice/bag), a small top-left corner emblem
 local MINIMAL_PAD = 6               -- minimalist top/bottom padding (no chrome to reserve)
 local MINIMAL_BG_BOOST = 0.4        -- minimalist-only second pass of the row art: no dark chrome behind the
                                     -- cards, so thicken the colored background slightly (alpha of the extra layer)
 
--- Minimalist mode: drop the banner header/footer chrome and turn the dice/bag medallion into a per-card
--- badge that peeks off each card's left edge (half behind the item icon). Same backend, two looks; the
--- slash commands set it per run, and a user option will pick the default later.
-local minimalMode = false
--- Snappy mode: make every banner animation instant (no intro flourish, no per-card slide/glow, no
--- fade-out) in BOTH looks, for players who prefer snappy over smooth. Slash-toggled for now.
-local instantMode = false
--- Which side of a roll card the loot-master controls (End/Cancel) hang off. Slash-toggled for now;
--- a lootmaster config option will pick it later.
-local mlControlsSide = "RIGHT"
+-- Loot banner look/behavior, all read straight from db.options (the Options tab writes them; the
+-- /wlbanner demo previews whatever they currently say):
+--   * minimal: drop the header/footer chrome, turn the dice/bag medallion into a per-card badge.
+--   * instant: every animation snaps (no intro flourish, per-card slide/glow, or fade-out).
+--   * ML side: which card edge the loot-master End/Cancel rail hangs off (RIGHT/LEFT).
+--   * locked: the banner cannot be dragged.
+local function bannerMinimal()
+    local o = addon.db and addon.db.options
+    return (o and o.bannerMinimal) and true or false
+end
+local function bannerInstant()
+    local o = addon.db and addon.db.options
+    return (o and o.bannerInstant) and true or false
+end
+local function bannerMLSide()
+    local o = addon.db and addon.db.options
+    return (o and o.bannerMLSide) or "RIGHT"
+end
+local function bannerLocked()
+    local o = addon.db and addon.db.options
+    return (o and o.bannerLocked) and true or false
+end
 
 local BB_STATE_BANNER_IN = 1        -- banner is animating in
 local BB_STATE_KILL_HOLD = 2        -- banner is holding with the headline
@@ -199,7 +210,7 @@ local function anchorMLButtons(frame)
     local prev
     for _, btn in ipairs(frame.MLButtons) do
         btn:ClearAllPoints()
-        if mlControlsSide == "LEFT" then
+        if bannerMLSide() == "LEFT" then
             if prev then
                 btn:SetPoint("TOPRIGHT", prev, "BOTTOMRIGHT", 0, -3)
             else
@@ -216,22 +227,34 @@ local function anchorMLButtons(frame)
     end
 end
 
+-- roll card second line, shared by card creation and the dedupe re-assert; an item with no
+-- listed priority shows the default bracket order, same as the roll popup did
+local function rollPrioText(prio)
+    return "|cffffffffPrio:|r " .. ((prio and prio ~= "") and prio or addon.DEFAULT_PRIO)
+end
+
 local itemScanTooltip   -- single shared hidden scanning tooltip
-local function BossBanner_ConfigureLootFrame(lootFrame, data)
-    -- data: { itemLink, texture, quantity, winner/winners/why, rolls } or a roll prompt { prompt }
+
+-- Everything about a row that derives from the ITEM (name, rarity tints, icon, set line). Split
+-- from ConfigureLootFrame so a card created on a cold item cache can re-render in place once the
+-- item info arrives (RefreshRollBannerCard), without rebuilding the row's roll/winner state.
+local function applyItemVisuals(lootFrame, itemLink, texture, fallbackName)
     local _, itemName, itemRarity, itemTexture, colorString, rarityColor, setName
-    itemName, _, itemRarity, _, _, _, _, _, _, itemTexture = GetItemInfo(data.itemLink)
+    itemName, _, itemRarity, _, _, _, _, _, _, itemTexture = GetItemInfo(itemLink)
 
     if not itemTexture then -- uncached item: parse name/rarity from the link
-        _, _, colorString, _, _, _, _, _, _, _, _, _, _, itemName = strfind(data.itemLink, "|?c?(%x*)|?H?([^:]*):?(%d+):?(%d*):?(%d*):?(%d*):?(%d*):?(%d*):?(%-?%d*):?(%-?%d*):?(%d*)|?h?%[?([^%[%]]*)%]?|?h?|?r?")
+        _, _, colorString, _, _, _, _, _, _, _, _, _, _, itemName = strfind(itemLink, "|?c?(%x*)|?H?([^:]*):?(%d+):?(%d*):?(%d*):?(%d*):?(%d*):?(%d*):?(%-?%d*):?(%-?%d*):?(%d*)|?h?%[?([^%[%]]*)%]?|?h?|?r?")
         itemRarity = colorRarity[colorString]
-        itemTexture = data.texture
+        itemTexture = texture
+        if not itemName or itemName == "" then
+            itemName = fallbackName   -- live feed on a cold cache passes a bare item:id link
+        end
     end
 
-    if IsDressableItem(data.itemLink) then -- gear: scan tooltip for a set name
+    if IsDressableItem(itemLink) then -- gear: scan tooltip for a set name
         itemScanTooltip = itemScanTooltip or CreateFrame("GameTooltip", "WeirdLootBannerScanTooltip", nil, "GameTooltipTemplate")
         itemScanTooltip:SetOwner(UIParent, "ANCHOR_NONE")
-        itemScanTooltip:SetHyperlink(data.itemLink)
+        itemScanTooltip:SetHyperlink(itemLink)
         for i = 2, itemScanTooltip:NumLines() do
             local text = _G["WeirdLootBannerScanTooltipTextLeft" .. i]:GetText()
             setName = findSetName(text)
@@ -246,13 +269,6 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
     lootFrame.Icon:SetTexture(itemTexture)
 
     SetItemButtonQuality(lootFrame.IconHitBox, itemRarity)
-
-    if data.quantity and data.quantity > 1 then
-        lootFrame.Count:Show()
-        lootFrame.Count:SetText(data.quantity)
-    else
-        lootFrame.Count:Hide()
-    end
 
     if setName then
         lootFrame.ItemName:ClearAllPoints()
@@ -269,6 +285,28 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
         lootFrame.PlayerName:SetPoint("TOPLEFT", lootFrame.ItemName, "BOTTOMLEFT", 0, -2)
     end
 
+    -- the minimal card's quality accents follow the item too
+    if lootFrame:GetParent().minimal then
+        lootFrame:SetBackdropBorderColor(rarityColor.r, rarityColor.g, rarityColor.b, 1)
+        lootFrame.Background2:SetVertexColor(rarityColor.r, rarityColor.g, rarityColor.b)
+    end
+
+    lootFrame.itemLink = itemLink
+    lootFrame.itemName = itemName
+    lootFrame.itemRarity = itemRarity or 1
+end
+
+local function BossBanner_ConfigureLootFrame(lootFrame, data)
+    -- data: { itemLink, texture, quantity, winner/winners/why, rolls } or a roll prompt { prompt }
+    applyItemVisuals(lootFrame, data.itemLink, data.texture, data.fallbackName)
+
+    if data.quantity and data.quantity > 1 then
+        lootFrame.Count:Show()
+        lootFrame.Count:SetText(data.quantity)
+    else
+        lootFrame.Count:Hide()
+    end
+
     -- Second line. A roll prompt passes a pre-formatted `prompt` (prio + bracket options); an awarded
     -- item passes winner(s): a single winner reads "Name - roll N - Bracket", multiple read
     -- "Name (Bracket), ...". winnerKeys lets the roll tooltip highlight the winners.
@@ -277,7 +315,7 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
     if data.rollDuration then
         -- roll card: the item's prio sits under the name (bracket buttons sit below it), mirroring
         -- the original roll popup's "Prio:" line.
-        nameText = "|cffffffffPrio:|r " .. (data.prio and data.prio ~= "" and data.prio or "Open")
+        nameText = rollPrioText(data.prio)
     elseif data.prompt then
         nameText = data.prompt
     else
@@ -308,9 +346,6 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
     lootFrame.PlayerName:SetText(nameText)
     lootFrame.PlayerName:SetTextColor(1, 1, 1) -- base white; the name carries its own |c color code
 
-    lootFrame.itemLink = data.itemLink
-    lootFrame.itemName = itemName
-    lootFrame.itemRarity = itemRarity or 1
     lootFrame.rolls = data.rolls
     lootFrame.winnerKeys = winnerKeys
     lootFrame.onChosen = data.onChosen
@@ -330,12 +365,11 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
     -- The left badge and the quality-colored card border are minimalist-only (they replace the medallion
     -- and the missing chrome's contrast). Read the owning banner's flag (set at play time) so they never
     -- disagree with the chrome/layout.
+    -- (applyItemVisuals already tinted the border/booster; this only flips their visibility)
     local minimal = lootFrame:GetParent().minimal
     if minimal then
         lootFrame.Badge:Show()
         lootFrame.IconHitBox.IconBorder:Hide()   -- the card's own quality border stands in for it
-        lootFrame:SetBackdropBorderColor(rarityColor.r, rarityColor.g, rarityColor.b, 1)
-        lootFrame.Background2:SetVertexColor(rarityColor.r, rarityColor.g, rarityColor.b)
         lootFrame.Background2:Show()
     else
         lootFrame.Badge:Hide()
@@ -863,8 +897,8 @@ local function buildBanner(bannerName, medallionCfg)
         frame.RollTimer:SetValue(1)
         frame.RollTimer:Hide()
 
-        -- Fade this roll card out now (bracket dismiss / ML End / ML Cancel), hiding its
-        -- interactive bits so they don't linger through the fade.
+        -- Fade this roll card out now (bracket dismiss / ML End / ML Cancel / a wire-side close),
+        -- hiding its interactive bits so they don't linger through the fade.
         frame.MLButtons = {}
         local function fadeOutRollRow()
             frame.fading = true
@@ -873,6 +907,7 @@ local function buildBanner(bannerName, medallionCfg)
             for _, b in ipairs(frame.RollButtons) do b:Hide() end
             for _, b in ipairs(frame.MLButtons) do b:Hide() end
         end
+        frame.FadeOutNow = fadeOutRollRow   -- the live feed closes cards by key (WIN/CANCEL) via this
 
         -- Bracket buttons for roll-prompt rows (hidden on awarded rows). Clicking selects a bracket;
         -- the choice stays highlighted. (Wiring to the real roll response is the next step.)
@@ -888,7 +923,10 @@ local function buildBanner(bannerName, medallionCfg)
             btn.bracket = b[1]
             btn:SetScript("OnClick", function(self)
                 if frame.selectedBracket == self.bracket then
-                    -- second click on the already-selected bracket: dismiss this roll (fade the row out)
+                    -- second click on the already-selected bracket: dismiss this roll (fade the row
+                    -- out). NOT for the loot master: the ML drives the roll and its card never
+                    -- auto-hides (same rule as the popup); a repeat click just stays selected.
+                    if frame.isOwnerCard then return end
                     rbDbg(("DISMISS idx=%s rd=%s"):format(tostring(frame.__idx), tostring(frame.rollDuration)))
                     fadeOutRollRow()
                     if frame.onChosen then frame.onChosen(frame.selectedBracket) end
@@ -903,7 +941,7 @@ local function buildBanner(bannerName, medallionCfg)
                 self:LockHighlight()
                 self:GetFontString():SetTextColor(0, 1, 0)       -- selected: green
                 frame.selectedBracket = self.bracket
-                -- (real use: the player's pick would be sent to the ML here)
+                if frame.onPick then frame.onPick(self.bracket) end   -- live feed: send the pick to the ML
             end)
             btn:Hide()
             frame.RollButtons[#frame.RollButtons + 1] = btn
@@ -1181,7 +1219,9 @@ local function buildBanner(bannerName, medallionCfg)
     end
 
     function addRow(self, data)
-        if aliveRowCount(self) >= BB_MAX_LOOT then return end
+        -- no row cap on either banner: rows come from a reuse pool (dead slots first, grow only on
+        -- a new high-water mark), roll cards must all show (the ML decides how many go out), and
+        -- won toasts drain themselves via resultHoldSeconds
         local additional = aliveRowCount(self) > 0   -- rows already shown => this is not the first item
         local frame, reused
         for _, f in ipairs(self.LootFrames) do
@@ -1197,11 +1237,18 @@ local function buildBanner(bannerName, medallionCfg)
         if frame.Anim and not self.instant then frame.Anim:Play() end   -- instant: card just appears
         relayoutAliveRows(self)
         if data.rollDuration then
-            -- roll-prompt row: a fixed countdown of the roll timer + clickable bracket buttons. It does
-            -- not extend or get extended (each roll runs its own clock).
+            -- roll-prompt row: a countdown of the roll timer + clickable bracket buttons. The live
+            -- feed passes getTimeLeft (the roll's own deadline is the clock; self-correcting and
+            -- pause-proof); plain data falls back to a local decrementing countdown, optionally
+            -- starting partial via rollRemaining (mid-roll restore).
             frame.rollDuration = data.rollDuration
-            frame.timeLeft = data.rollDuration
-            frame.RollTimer:SetValue(1)
+            frame.getTimeLeft = data.getTimeLeft
+            frame.timeLeft = (data.getTimeLeft and data.getTimeLeft()) or data.rollRemaining or data.rollDuration
+            frame.rowKey = data.key
+            frame.isOwnerCard = data.isOwner
+            frame.onPick = data.onPick
+            frame.onExpired = data.onExpired
+            frame.RollTimer:SetValue(max(frame.timeLeft, 0) / data.rollDuration)
             frame.RollTimer:SetStatusBarColor(0, 1, 0.1)
             frame.RollTimer:Show()
             frame.selectedBracket = nil
@@ -1240,6 +1287,17 @@ local function buildBanner(bannerName, medallionCfg)
                 end
                 btn:Show()
             end
+            -- prior pick (prefired loot-tab choice or a restored mid-roll card): open with that
+            -- bracket already selected, exactly like the popup does
+            if data.selected then
+                for _, btn in ipairs(frame.RollButtons) do
+                    if btn.bracket == data.selected and btn:GetButtonState() ~= "DISABLED" then
+                        btn:LockHighlight()
+                        btn:GetFontString():SetTextColor(0, 1, 0)
+                        frame.selectedBracket = data.selected
+                    end
+                end
+            end
             -- ML rail: only a card given ML callbacks shows the controls (the real feed passes
             -- them only to the authorized loot master). Anchored per the current side each show.
             frame.onMLEnd = data.onMLEnd
@@ -1255,11 +1313,16 @@ local function buildBanner(bannerName, medallionCfg)
                 tostring(frame.__idx), tostring(reused), b1:GetAlpha(), b1:GetEffectiveAlpha(),
                 frame:GetAlpha(), frame:GetEffectiveAlpha()))
             frame.__rbWatch = 0.35   -- one-shot re-check ~0.35s later
-            return
+            return true
         end
         rbDbg(("add-WON idx=%s reused=%s rd=%s HIDE-buttons"):format(tostring(frame.__idx), tostring(reused), tostring(data.rollDuration)))
         frame.rollDuration = nil
         frame.getRollers = nil
+        frame.getTimeLeft = nil
+        frame.rowKey = nil
+        frame.isOwnerCard = nil
+        frame.onPick = nil
+        frame.onExpired = nil
         frame.RollCount:SetText("")
         frame.RollCountChip:Hide()
         frame.RollTimer:Hide()
@@ -1283,22 +1346,28 @@ local function buildBanner(bannerName, medallionCfg)
                 end
             end
         end
+        return true
     end
 
     function updateRowLifetimes(self, elapsed)
+        -- The reading pause holds WON rows only: a tooltip freezes their lifetime so the text can
+        -- be read. Roll rows always tick; their clock is the raid's roll deadline, not the mouse.
+        local paused = false
         if self.showingTooltip then
             self.hoveredThisVisit = true
             self.hoverGrace = nil
-            return
-        end
-        if self.hoveredThisVisit then
+            paused = true
+        elseif self.hoveredThisVisit then
             self.hoverGrace = (self.hoverGrace or 0.12) - elapsed
-            if self.hoverGrace > 0 then return end
-            self.hoveredThisVisit = false
-            self.hoverGrace = nil
-            for _, f in ipairs(self.LootFrames) do
-                -- roll rows keep their own clock; only won rows collapse to a 2s exit on mouse-off
-                if f.alive and not f.fading and not f.rollDuration then f.timeLeft = 2 end
+            if self.hoverGrace > 0 then
+                paused = true
+            else
+                self.hoveredThisVisit = false
+                self.hoverGrace = nil
+                for _, f in ipairs(self.LootFrames) do
+                    -- only won rows collapse to a 2s exit on mouse-off
+                    if f.alive and not f.fading and not f.rollDuration then f.timeLeft = 2 end
+                end
             end
         end
         for _, f in ipairs(self.LootFrames) do
@@ -1318,7 +1387,9 @@ local function buildBanner(bannerName, medallionCfg)
         local removed, stillCounting = false, 0
         for _, f in ipairs(self.LootFrames) do
             if f.alive then
-                if f.fading then
+                if paused and not f.rollDuration then
+                    stillCounting = stillCounting + 1   -- won row held for reading: alive, not done
+                elseif f.fading then
                     f.fadeLeft = f.fadeLeft - elapsed
                     if f.fadeLeft <= 0 then
                         rbDbg(("RM idx=%s rd=%s"):format(tostring(f.__idx), tostring(f.rollDuration)))
@@ -1335,12 +1406,23 @@ local function buildBanner(bannerName, medallionCfg)
                         f:SetAlpha(f.fadeLeft / ROW_FADE_TIME)
                     end
                 else
-                    f.timeLeft = f.timeLeft - elapsed
+                    if f.getTimeLeft then
+                        f.timeLeft = f.getTimeLeft()   -- live feed: the roll's own deadline is the clock
+                    else
+                        f.timeLeft = f.timeLeft - elapsed
+                    end
                     if f.timeLeft <= 0 then
                         rbDbg(("FADE idx=%s rd=%s"):format(tostring(f.__idx), tostring(f.rollDuration)))
                         f.fading = true
                         f.fadeLeft = self.instant and 0 or ROW_FADE_TIME   -- instant: remove next tick, no fade
                         if f.rollDuration then f.RollTimer:Hide() end   -- roll time is up
+                        if f.rollDuration and f.onExpired then
+                            -- one-shot, deferred a frame: the callback resolves the roll (ML), which
+                            -- closes cards and adds win rows; keep that out of this iteration
+                            local cb = f.onExpired
+                            f.onExpired = nil
+                            schedule0(cb)
+                        end
                     else
                         stillCounting = stillCounting + 1
                         if f.rollDuration then
@@ -1512,8 +1594,8 @@ local function buildBanner(bannerName, medallionCfg)
 
     local function BossBanner_Play(self, data)
         if not data then return end
-        self.minimal = minimalMode
-        self.instant = instantMode
+        self.minimal = bannerMinimal()
+        self.instant = bannerInstant()
         -- intro: keep the unfurl + lightning, show the medallion (bag or dice) right away, no title hold.
         -- Minimalist mode hides all chrome and skips the flourish; each card's left badge stands in.
         applyMedallion(self)
@@ -1536,38 +1618,72 @@ local function buildBanner(bannerName, medallionCfg)
     end
 
     -- Add one item (or roll prompt). Inserts into a live banner, interrupts a fade, or unfurls fresh.
+    -- Returns true when the banner took (or queued, or already shows) the item; false when it can't
+    -- (zero hold time on a win toast) so a live feed can fall back instead of losing anything.
     local function BossBanner_AddItem(self, item)
-        if not item or not item.link then return end
-        if resultHoldSeconds() == 0 then return end   -- duration 0: do not show the toast at all
+        if not item or not item.link then return false end
+        -- duration 0 means "no win toasts"; a roll prompt is not a toast and must still show
+        if resultHoldSeconds() == 0 and not item.rollDuration then return false end
         if item.key then
-            if self.seenKeys[item.key] then return end
+            if self.seenKeys[item.key] then
+                -- Already showing. For a roll card this means a ledger restore raced the DROP: the
+                -- restore guessed the timing (local default duration) and prio, and the DROP now
+                -- carries the ML's authoritative values. The popup path fixes this by re-binding
+                -- its reused frame; the card equivalent is re-asserting timing + prio on the live
+                -- row (callbacks already resolve the current roll by id, so they need no rebind).
+                if item.rollDuration then
+                    for _, f in ipairs(self.LootFrames) do
+                        if f.alive and not f.fading and f.rowKey == item.key and f.rollDuration then
+                            f.rollDuration = item.rollDuration   -- bar denominator
+                            f.PlayerName:SetText(rollPrioText(item.prio))
+                            -- timing needs no re-assert: getTimeLeft reads the current roll's
+                            -- deadline, which the newer feed already corrected
+                        end
+                    end
+                end
+                return true   -- handled, not lost
+            end
             self.seenKeys[item.key] = true
         end
         local data = {
             itemLink = item.link, texture = item.icon, quantity = item.quantity or 1,
+            fallbackName = item.fallbackName, -- shown when the link is a bare item:id (cold cache)
             winner = item.winner, winnerClass = item.winnerClass, why = item.why,
             winners = item.winners, rolls = item.rolls, prompt = item.prompt, rollDuration = item.rollDuration,
-            disabled = item.disabled,   -- set of bracket labels (e.g. {OS=true}) the player can't pick
+            rollRemaining = item.rollRemaining, -- static seconds-left (demo/plain data; ignored with a thunk)
+            getTimeLeft = item.getTimeLeft, -- live feed: per-tick seconds left from the roll's own deadline
+            key = item.key,             -- roll card only: lets the live feed close/update the card by id
+            disabled = item.disabled,   -- bracket label -> true or reason text (hover explains the dead button)
+            selected = item.selected,   -- roll card only: bracket label to open pre-highlighted (prior pick)
             prio = item.prio,           -- roll card only: the item's listed priority, shown under the name
+            isOwner = item.isOwner,     -- roll card only: the loot master's card never dismisses on repeat click
+            onPick = item.onPick,       -- roll card only: fired with the bracket label on every selection
             onChosen = item.onChosen,   -- roll card only: fired with the chosen bracket when the card is dismissed
+            onExpired = item.onExpired, -- roll card only: fired once when the countdown hits zero
             onMLEnd = item.onMLEnd,     -- roll card only: ML control; present = show the End button, fired on click
             onMLCancel = item.onMLCancel, -- roll card only: ML control; present = show the Cancel button
             getRollers = item.getRollers, -- roll card only: thunk returning { name, class, bracket } rollers for the hover
         }
         if self.animState == BB_STATE_LOOT_INSERT then
-            addRow(self, data)
+            local ok = addRow(self, data)
+            if not ok and item.key then self.seenKeys[item.key] = nil end   -- row cap: not showing after all
+            return ok
         elseif self.animState == BB_STATE_BANNER_OUT then
             rbDbg(("INTERRUPT %s alive=%d"):format(bannerName, aliveRowCount(self)))
             self.AnimOut:Stop()
             self:SetAlpha(1)
             self.animState = BB_STATE_LOOT_INSERT
             self.animTimeLeft = 86400
-            addRow(self, data)
+            local ok = addRow(self, data)
+            if not ok and item.key then self.seenKeys[item.key] = nil end
+            return ok
         elseif not self.animState then
             tinsert(self.pendingLoot, data)
             self:PlayBanner({ mode = "KILL" })
+            return true
         else
             tinsert(self.pendingLoot, data)
+            return true
         end
     end
 
@@ -1655,9 +1771,9 @@ local function restoreRegionPosition()
 end
 
 local function enableRegionDrag(banner)
-    local function dragStart() bannerRegion:StartMoving() end
+    local function dragStart() if not bannerLocked() then bannerRegion:StartMoving() end end
     local function dragStop()
-        bannerRegion:StopMovingOrSizing()
+        bannerRegion:StopMovingOrSizing()   -- harmless if StartMoving never fired (locked)
         saveRegionPosition()
     end
     banner:RegisterForDrag("LeftButton")
@@ -1677,7 +1793,7 @@ local function layoutRegion()
     awardedBanner:ClearAllPoints()
     if dropsBanner:IsShown() then
         -- full mode overlaps into the drops footer chrome; minimalist has none, so just leave a small gap
-        local gap = minimalMode and -MINIMAL_PAD or REGION_OVERLAP
+        local gap = bannerMinimal() and -MINIMAL_PAD or REGION_OVERLAP
         awardedBanner:SetPoint("TOP", dropsBanner, "BOTTOM", 0, gap)   -- moves as drops resizes
     else
         awardedBanner:SetPoint("TOP", bannerRegion, "TOP", 0, 0)
@@ -1687,6 +1803,113 @@ dropsBanner.onLayoutChanged = layoutRegion
 awardedBanner.onLayoutChanged = layoutRegion
 layoutRegion()
 
+local bannerAnchorPreview   -- the config-anchor placeholder (built lazily by SetLootBannerAnchorShown)
+
+-- Options "Reset banner position": drop the saved spot and snap the region back to the default
+-- (top-center), so a banner parked off-screen is recoverable without editing SavedVariables.
+function addon:ResetLootBannerPosition()
+    if addon.db and addon.db.ui then addon.db.ui.lootBannerRegion = nil end
+    bannerRegion:ClearAllPoints()
+    bannerRegion:SetPoint("TOP", UIParent, "TOP", 0, REGION_TOP)
+    layoutRegion()
+    if bannerAnchorPreview and bannerAnchorPreview:IsShown() then bannerAnchorPreview:ClearAllPoints()
+        bannerAnchorPreview:SetPoint("TOP", bannerRegion, "TOP", 0, 0) end
+end
+
+-- Config anchor: a placeholder sitting exactly where the banners appear, shown while the Options
+-- tab is open so the region can be dragged into place without waiting for a real loot drop. Built
+-- lazily on first show; drags move the same region the live banners hang off (honoring the lock).
+local ANCHOR_PREVIEW_ROLLS, ANCHOR_PREVIEW_WINS = 3, 3   -- footprint the placeholder simulates
+local function buildBannerAnchorPreview()
+    local PAD, ZONE_GAP = 8, 10
+    local rollZoneH = ANCHOR_PREVIEW_ROLLS * DROP_ROW_H + (ANCHOR_PREVIEW_ROLLS - 1) * ROW_GAP
+    local winZoneH  = ANCHOR_PREVIEW_WINS * WON_ROW_H + (ANCHOR_PREVIEW_WINS - 1) * ROW_GAP
+    local totalH = PAD + rollZoneH + ZONE_GAP + winZoneH + PAD
+
+    local f = CreateFrame("Frame", "WeirdLootBannerAnchorPreview", UIParent)
+    f:SetSize(269, totalH)   -- the space three rolls + three wins occupy at once
+    f:SetPoint("TOP", bannerRegion, "TOP", 0, 0)
+    f:SetFrameStrata("MEDIUM")   -- one band below the HIGH main window, so it sits behind it
+    f:EnableMouse(true)
+    f:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 12,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 },
+    })
+    f:SetBackdropColor(0.08, 0.08, 0.08, 0.82)
+    f:SetBackdropBorderColor(1, 0.82, 0, 0.8)
+
+    -- faint slot rectangles, roll-height then win-height, so the placeholder reads as the real stack.
+    -- Recorded on f.slots so the locked state can desaturate them (tinted -> gray).
+    f.slots = {}
+    local function slot(y, h, r, g, b)
+        local t = f:CreateTexture(nil, "ARTWORK")
+        t:SetTexture("Interface\\Buttons\\WHITE8x8")
+        t:SetVertexColor(r, g, b, 0.16)
+        t:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, y)
+        t:SetPoint("TOPRIGHT", f, "TOPRIGHT", -PAD, y)
+        t:SetHeight(h)
+        f.slots[#f.slots + 1] = { tex = t, r = r, g = g, b = b }
+    end
+    local y = -PAD
+    for _ = 1, ANCHOR_PREVIEW_ROLLS do
+        slot(y, DROP_ROW_H, 0.4, 0.7, 1.0)   -- roll slots: cool tint (dice)
+        y = y - DROP_ROW_H - ROW_GAP
+    end
+    y = y + ROW_GAP - ZONE_GAP
+    for _ = 1, ANCHOR_PREVIEW_WINS do
+        slot(y, WON_ROW_H, 1.0, 0.82, 0.2)   -- win slots: gold tint (bag)
+        y = y - WON_ROW_H - ROW_GAP
+    end
+
+    f.title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    f.title:SetPoint("CENTER", 0, 8)
+    f.title:SetText("WeirdLoot Loot Banner")
+    f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    f.hint:SetPoint("CENTER", 0, -8)
+
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", function()
+        if not bannerLocked() then bannerRegion:StartMoving() end
+    end)
+    f:SetScript("OnDragStop", function()
+        bannerRegion:StopMovingOrSizing()
+        saveRegionPosition()
+        f:ClearAllPoints()
+        f:SetPoint("TOP", bannerRegion, "TOP", 0, 0)   -- follow the region to its dropped spot
+    end)
+    f:Hide()
+    return f
+end
+
+-- Called by the tab system: show the placeholder while the Options tab is open, hide it otherwise.
+function addon:SetLootBannerAnchorShown(shown)
+    if not shown then
+        if bannerAnchorPreview then bannerAnchorPreview:Hide() end
+        return
+    end
+    local f = bannerAnchorPreview or buildBannerAnchorPreview()
+    bannerAnchorPreview = f
+    f:ClearAllPoints()
+    f:SetPoint("TOP", bannerRegion, "TOP", 0, 0)
+
+    -- Locked: fade the whole placeholder and desaturate its slots (gray), so it reads as inert.
+    local locked = bannerLocked()
+    f.hint:SetText(locked and "|cffff5555locked|r" or "drag to move")
+    f:EnableMouse(not locked)
+    f:SetAlpha(locked and 0.4 or 1)
+    f:SetBackdropBorderColor(locked and 0.5 or 1, locked and 0.5 or 0.82, locked and 0.5 or 0, 0.8)
+    for _, s in ipairs(f.slots) do
+        if locked then
+            local lum = 0.3 * s.r + 0.59 * s.g + 0.11 * s.b
+            s.tex:SetVertexColor(lum, lum, lum, 0.16)
+        else
+            s.tex:SetVertexColor(s.r, s.g, s.b, 0.16)
+        end
+    end
+    f:Show()
+end
+
 ------------------------------------------------------------------
 -- public API
 function addon:AddLootBannerItem(item)
@@ -1694,7 +1917,52 @@ function addon:AddLootBannerItem(item)
 end
 
 function addon:AddRollBannerItem(item)
-    dropsBanner:AddItem(item)
+    return dropsBanner:AddItem(item)
+end
+
+-- Close a live roll card by its key (the lot id): WIN, CANCEL, or any wire-side end of the roll.
+-- Also clears the dedupe key so the same lot can roll again later (cancel -> re-roll).
+function addon:CloseRollBannerCard(key)
+    if not key then return end
+    dropsBanner.seenKeys[key] = nil
+    for _, f in ipairs(dropsBanner.LootFrames) do
+        if f.alive and not f.fading and f.rowKey == key then
+            f.rowKey = nil
+            f.onExpired = nil
+            f.FadeOutNow()
+        end
+    end
+end
+
+-- Re-render a card's item visuals in place once a cold item cache resolves (the live feed's name
+-- ticker calls this with the real link); the roll state, buttons, and countdown are untouched.
+function addon:RefreshRollBannerCard(key, link, icon)
+    if not (key and link) then return end
+    for _, f in ipairs(dropsBanner.LootFrames) do
+        if f.alive and f.rowKey == key and f.rollDuration then
+            applyItemVisuals(f, link, icon)
+        end
+    end
+end
+
+-- Reflect the local player's pick on an open roll card (loot-tab picks and the popup path both
+-- route through ApplyLocalChoice); nil clears the highlight, mirroring the popup behavior.
+function addon:SetRollBannerCardChoice(key, bracket)
+    for _, f in ipairs(dropsBanner.LootFrames) do
+        if f.alive and not f.fading and f.rowKey == key and f.rollDuration then
+            for _, b in ipairs(f.RollButtons) do
+                if b:GetButtonState() ~= "DISABLED" then
+                    b:UnlockHighlight()
+                    b:GetFontString():SetTextColor(1, 0.82, 0)
+                    if bracket and b.bracket == bracket then
+                        b:LockHighlight()
+                        b:GetFontString():SetTextColor(0, 1, 0)
+                    end
+                end
+            end
+            f.selectedBracket = bracket
+        end
+    end
 end
 
 function addon:ShowLootBanner(opts)
@@ -1891,22 +2159,7 @@ local function runBannerExample()
     end)
 end
 
--- `/wlbanner` = full chrome, `/wlbannermin` = minimalist (no header/footer, per-card dice/bag badge).
--- Same backend; the mode flag is the only difference. A user option will pick the default later.
+-- `/wlbanner` previews the stacked banners (dice drops + bag awarded) with sample data, using the
+-- current Options-tab look (minimal/instant/ML-side): toggle those in Options, then re-run to see it.
 SLASH_WLBANNER1 = "/wlbanner"
-SlashCmdList["WLBANNER"] = function() minimalMode = false; runBannerExample() end
-SLASH_WLBANNERMIN1 = "/wlbannermin"
-SlashCmdList["WLBANNERMIN"] = function() minimalMode = true; runBannerExample() end
--- `/wlbannerinstant` toggles snappy (instant) animations for both modes; re-run /wlbanner(min) to see it.
-SLASH_WLBANNERINSTANT1 = "/wlbannerinstant"
-SlashCmdList["WLBANNERINSTANT"] = function()
-    instantMode = not instantMode
-    print("WeirdLoot banner animations: " .. (instantMode and "INSTANT (snappy)" or "smooth"))
-end
--- `/wlbannermlside` flips the ML End/Cancel rail between the roll card's right and left edge; re-run
--- /wlbanner(min) to see it. A lootmaster config option will pick the default later.
-SLASH_WLBANNERMLSIDE1 = "/wlbannermlside"
-SlashCmdList["WLBANNERMLSIDE"] = function()
-    mlControlsSide = (mlControlsSide == "RIGHT") and "LEFT" or "RIGHT"
-    print("WeirdLoot banner ML controls: " .. mlControlsSide)
-end
+SlashCmdList["WLBANNER"] = function() runBannerExample() end

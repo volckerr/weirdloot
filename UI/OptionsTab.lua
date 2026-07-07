@@ -21,10 +21,16 @@ function addon:BuildOptionsTab()
     scroll:SetPoint("BOTTOMRIGHT", self.ui.content, "BOTTOMRIGHT", -24, 0)
     self.ui.panels.options = scroll
 
+    -- Show the drag placeholder (a stand-in at the banner's spot) only while this tab is visible so
+    -- players can pre-position without a real drop. OnShow/OnHide fire on tab switch AND on the main
+    -- window opening/closing (ancestor visibility propagates), so this one hook covers every case.
+    scroll:HookScript("OnShow", function() if addon.SetLootBannerAnchorShown then addon:SetLootBannerAnchorShown(true) end end)
+    scroll:HookScript("OnHide", function() if addon.SetLootBannerAnchorShown then addon:SetLootBannerAnchorShown(false) end end)
+
     local panel = CreateFrame("Frame", nil, scroll)
     elevateInteractiveFrame(panel, scroll, 1)
     panel:SetWidth(920)
-    panel:SetHeight(944)   -- includes the showResultAfterHideCB row added to the raider-options column
+    panel:SetHeight(1096)   -- includes the Loot Banner display section (header + 4 rows) before whitelist
     scroll:SetScrollChild(panel)
     scroll:EnableMouseWheel(true)
     scroll:SetScript("OnMouseWheel", function(selfFrame, delta)
@@ -50,8 +56,8 @@ function addon:BuildOptionsTab()
     titleDivider:SetPoint("TOPLEFT", panel.title, "BOTTOMLEFT", 0, -4)
     titleDivider:SetPoint("RIGHT", panel, "RIGHT", -40, 0)
 
-    -- Result popup auto-close
-    local autoCloseCB = createOptionsCheckbox(panel, "Auto-close winner popup after")
+    -- Winner banner hold time (the finished-loot toast; still keyed resultPopupAutoClose* for compat)
+    local autoCloseCB = createOptionsCheckbox(panel, "Auto-hide the winner banner after")
     autoCloseCB:SetPoint("TOPLEFT", titleDivider, "BOTTOMLEFT", 0, -14)
     autoCloseCB:SetChecked(opt.resultPopupAutoCloseEnabled and true or false)
 
@@ -97,7 +103,7 @@ function addon:BuildOptionsTab()
 
     -- Keep finished-loot winner popups open on the ML's screen so they can study the winners,
     -- ignoring the ML's own auto-close. ML-only: raiders always follow their personal setting.
-    local keepResultCB = createOptionsCheckbox(panel, "Never auto-close your loot popups")
+    local keepResultCB = createOptionsCheckbox(panel, "Never auto-hide your own winner banners")
     keepResultCB:SetPoint("TOPLEFT", lmDivider, "BOTTOMLEFT", 0, -14)
     keepResultCB:SetChecked(opt.forceKeepResultPopup ~= false)   -- default ON
     keepResultCB:SetScript("OnClick", function(selfCB)
@@ -289,6 +295,51 @@ function addon:BuildOptionsTab()
     UIDropDownMenu_SetText(anchorDrop, anchorText(opt.rollResultTooltipAnchor or "RIGHT"))
 
     -- ============================================================
+    -- Loot Banner (display) -- the roll cards + winner toast. Section header, then the look toggles
+    -- and the position controls. Anchored into the chain in the final layout pass below.
+    -- ============================================================
+    local bannerHeader = createLabel(panel, "Loot Banner", "TOPLEFT", panel, "TOPLEFT", 12, 0)
+    bannerHeader:SetFontObject(GameFontHighlightLarge)
+    bannerHeader:SetTextColor(1, 0.82, 0)
+    local bannerDivider = panel:CreateTexture(nil, "ARTWORK")
+    bannerDivider:SetTexture("Interface\\Buttons\\WHITE8x8")
+    bannerDivider:SetVertexColor(0.5, 0.4, 0.1, 0.6)
+    bannerDivider:SetHeight(1)
+    bannerDivider:SetPoint("TOPLEFT", bannerHeader, "BOTTOMLEFT", 0, -4)
+    bannerDivider:SetPoint("RIGHT", panel, "RIGHT", -40, 0)
+
+    local bannerMinimalCB = createOptionsCheckbox(panel, "Minimalist look (per-card badge, no banner chrome)")
+    bannerMinimalCB:SetChecked(opt.bannerMinimal and true or false)
+    bannerMinimalCB:SetScript("OnClick", function(selfCB)
+        getOptions(addon).bannerMinimal = selfCB:GetChecked() and true or false
+    end)
+
+    local bannerInstantCB = createOptionsCheckbox(panel, "Snappy animations (skip the intro flourish and fades)")
+    bannerInstantCB:SetChecked(opt.bannerInstant and true or false)
+    bannerInstantCB:SetScript("OnClick", function(selfCB)
+        getOptions(addon).bannerInstant = selfCB:GetChecked() and true or false
+    end)
+
+    local bannerMLSideCB = createOptionsCheckbox(panel, "Loot master roll controls on the left of the card")
+    bannerMLSideCB:SetChecked((opt.bannerMLSide or "RIGHT") == "LEFT")
+    bannerMLSideCB:SetScript("OnClick", function(selfCB)
+        getOptions(addon).bannerMLSide = selfCB:GetChecked() and "LEFT" or "RIGHT"
+    end)
+
+    local bannerLockCB = createOptionsCheckbox(panel, "Lock banner position (disable dragging)")
+    bannerLockCB:SetChecked(opt.bannerLocked and true or false)
+    bannerLockCB:SetScript("OnClick", function(selfCB)
+        getOptions(addon).bannerLocked = selfCB:GetChecked() and true or false
+        if addon.SetLootBannerAnchorShown then addon:SetLootBannerAnchorShown(true) end   -- refresh hint/drag
+    end)
+
+    local resetPosBtn = createButton(panel, "Reset position", 110, 22)
+    resetPosBtn:SetScript("OnClick", function()
+        if addon.ResetLootBannerPosition then addon:ResetLootBannerPosition() end
+        addon:Print("Loot banner position reset to the default (top center).")
+    end)
+
+    -- ============================================================
     -- Final layout pass: positions widgets in the user-facing order
     -- regardless of the creation order above. Anchor chain (top -> bottom):
     --   Options title (already anchored to panel)
@@ -320,8 +371,17 @@ function addon:BuildOptionsTab()
     minimapCB:ClearAllPoints()
     minimapCB:SetPoint("TOPLEFT", anchorLabel, "BOTTOMLEFT", 0, -22)
 
+    -- Loot Banner section between the display options and the filter lists
+    bannerHeader:ClearAllPoints()
+    bannerHeader:SetPoint("TOPLEFT", minimapCB, "BOTTOMLEFT", 0, -24)
+    bannerMinimalCB:SetPoint("TOPLEFT", bannerDivider, "BOTTOMLEFT", 0, -12)
+    bannerInstantCB:SetPoint("TOPLEFT", bannerMinimalCB, "BOTTOMLEFT", 0, -8)
+    bannerMLSideCB:SetPoint("TOPLEFT", bannerInstantCB, "BOTTOMLEFT", 0, -8)
+    bannerLockCB:SetPoint("TOPLEFT", bannerMLSideCB, "BOTTOMLEFT", 0, -8)
+    resetPosBtn:SetPoint("LEFT", bannerLockCB.label or bannerLockCB, "RIGHT", 16, 0)
+
     whitelistCB:ClearAllPoints()
-    whitelistCB:SetPoint("TOPLEFT", minimapCB, "BOTTOMLEFT", 0, -22)
+    whitelistCB:SetPoint("TOPLEFT", bannerLockCB, "BOTTOMLEFT", 0, -22)
 
     lmHeader:ClearAllPoints()
     lmHeader:SetPoint("TOP", blacklistBox, "BOTTOM", 0, -28)
@@ -342,6 +402,10 @@ function addon:BuildOptionsTab()
     panel.minimapCB = minimapCB
     panel.hideUnusableCB = hideUnusableCB
     panel.anchorDrop = anchorDrop
+    panel.bannerMinimalCB = bannerMinimalCB
+    panel.bannerInstantCB = bannerInstantCB
+    panel.bannerMLSideCB = bannerMLSideCB
+    panel.bannerLockCB = bannerLockCB
 end
 
 -- Re-sync the options-tab widgets from db state. Called from the slash-command handlers so a

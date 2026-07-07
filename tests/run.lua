@@ -1133,6 +1133,165 @@ test("showResultAfterHide no longer gates the win banner (shows with the option 
     eq(#raider.addon._bannerItems, 1, "banner shows for the dismisser with the option on too")
 end)
 
+-- ---------------------------------------------------------------------------
+-- banner roll cards: the live wiring. The banner is the default surface in-game; the harness stub
+-- refuses cards by default (popup battery above tests the fallback path), so these opt in.
+-- ---------------------------------------------------------------------------
+local function bannerRollWithRaider(itemId)
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local raider = makeWorld("Raidertwo", false)
+    ml.addon._rollBannerAccept = true
+    raider.addon._rollBannerAccept = true
+    startSession(ml)
+    setBag(ml, itemId, 1); bagUpdate(ml)
+    local lot = openLot(ml, itemId)
+    ml.addon:BroadcastSession(); flushWireTo(raider)
+    ml.addon:StartLiveRoll(lot.id); flushWireTo(raider)
+    return ml, raider, lot
+end
+local function cardFor(w, lotId)
+    for _, it in ipairs(w.addon._rollBannerItems) do
+        if it.key == lotId then return it end
+    end
+end
+
+test("banner mode: a roll shows as a card on both sides, no interest popup", function()
+    local ml, raider, lot = bannerRollWithRaider(40005)
+    local mlCard, raiderCard = cardFor(ml, lot.id), cardFor(raider, lot.id)
+    check(mlCard, "the ML got a roll card")
+    check(raiderCard, "the raider got a roll card")
+    for _, w in ipairs({ ml, raider }) do
+        for _, f in ipairs(w.addon.live.active) do
+            check(f.mode ~= "interest", "no interest popup alongside the card")
+            check(f.mode ~= "pending", "the ML's pending popup was closed when the card took over")
+        end
+    end
+    check(mlCard.onMLEnd and mlCard.onMLCancel and mlCard.onExpired, "the ML card carries the ML controls")
+    check(not (raiderCard.onMLEnd or raiderCard.onMLCancel or raiderCard.onExpired), "the raider card does not")
+    check(mlCard.isOwner, "the ML card is flagged owner (repeat click must not dismiss it)")
+    check(not raiderCard.isOwner, "the raider card is not")
+    check(type(mlCard.getTimeLeft) == "function", "card asks the roll for time, it owns no clock")
+    local left = mlCard.getTimeLeft()
+    check(mlCard.rollDuration and left > 0 and left <= mlCard.rollDuration, "honest countdown from the deadline")
+    check(type(raiderCard.getRollers) == "function", "card exposes the roller thunk")
+end)
+
+test("banner mode: a card pick routes through ChooseInterest to the ML", function()
+    local ml, raider, lot = bannerRollWithRaider(40005)
+    cardFor(raider, lot.id).onPick("MS")
+    flushWireTo(ml)
+    local found
+    for _, e in ipairs(ml.addon:ActiveRollers(lot.id)) do
+        if e.name == "Raidertwo" and e.tier == "ms" then found = true end
+    end
+    check(found, "the ML registered the raider's MS pick")
+    eq(rollFor(raider, lot.id).choice, "ms", "raider's local choice tracks the pick")
+    local synced = raider.addon._rollBannerChoices[#raider.addon._rollBannerChoices]
+    check(synced and synced.key == lot.id and synced.bracket == "MS", "the card highlight was synced back")
+end)
+
+test("banner mode: card dismiss mirrors the popup's bookkeeping", function()
+    local ml, raider, lot = bannerRollWithRaider(40005)
+    local card = cardFor(raider, lot.id)
+    card.onPick("Pass")
+    card.onChosen("Pass")   -- repeat click: the card dismissed itself
+    local roll = rollFor(raider, lot.id)
+    check(roll.dismissed, "dismiss recorded")
+    eq(roll.choice, nil, "a pass dismiss clears the choice (it carries no interest)")
+end)
+
+test("banner mode: ML End resolves the roll and closes cards everywhere", function()
+    local ml, raider, lot = bannerRollWithRaider(40005)
+    cardFor(raider, lot.id).onPick("MS")
+    flushWireTo(ml)
+    cardFor(ml, lot.id).onMLEnd()
+    flushWireTo(raider)
+    eq(#raider.addon._bannerItems, 1, "the raider got the win banner")
+    local closed
+    for _, k in ipairs(raider.addon._rollBannerClosed) do if k == lot.id then closed = true end end
+    check(closed, "the raider's roll card was closed by the WIN")
+    closed = nil
+    for _, k in ipairs(ml.addon._rollBannerClosed) do if k == lot.id then closed = true end end
+    check(closed, "the ML's roll card was closed by the resolve")
+end)
+
+test("banner mode: ML Cancel closes cards and returns the lot to pending", function()
+    local ml, raider, lot = bannerRollWithRaider(40005)
+    cardFor(ml, lot.id).onMLCancel()
+    flushWireTo(raider)
+    local core = ml.addon.lootCore
+    eq(core:Get(lot.id).state, core.STATE.PENDING, "lot went back to pending")
+    local closed
+    for _, k in ipairs(raider.addon._rollBannerClosed) do if k == lot.id then closed = true end end
+    check(closed, "the raider's card was closed by the CANCEL")
+end)
+
+test("banner mode: onExpired auto-resolves for the ML like the popup deadline did", function()
+    local ml, raider, lot = bannerRollWithRaider(40005)
+    ml.addon:SetPlayerResponse(lot.id, "Alice", "ms")   -- a roller, so the resolve yields a winner
+    cardFor(ml, lot.id).onExpired()
+    flushWireTo(raider)
+    eq(#raider.addon._bannerItems, 1, "expiry resolved the roll and the win reached the raider")
+end)
+
+test("banner mode: a prefired pick opens the ML's card preselected", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    ml.addon._rollBannerAccept = true
+    startSession(ml)
+    setBag(ml, 40005, 1); bagUpdate(ml)
+    local lot = openLot(ml, 40005)
+    ml.addon:SetPlayerResponse(lot.id, "Masterlooter", "bis")   -- loot-tab pick before the roll
+    ml.addon:StartLiveRoll(lot.id)
+    eq(cardFor(ml, lot.id).selected, "BiS", "the card opened with the prior pick highlighted")
+end)
+
+test("banner mode: a refused card falls back to the interest popup", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    ml.addon._rollBannerAccept = false   -- defensive banner refusal (also the harness default)
+    startSession(ml)
+    setBag(ml, 40005, 1); bagUpdate(ml)
+    local lot = openLot(ml, 40005)
+    ml.addon:StartLiveRoll(lot.id)
+    eq(#ml.addon._rollBannerItems, 0, "no card was shown")
+    local hasInterest
+    for _, f in ipairs(ml.addon.live.active) do
+        if f.mode == "interest" then hasInterest = true end
+    end
+    check(hasInterest, "the roll fell back to the popup instead of being lost")
+end)
+
+test("banner mode: cold item cache still yields a card with a fallback name", function()
+    local ml = (function()
+        clearWire()
+        return makeWorld("Masterlooter", true)
+    end)()
+    local raider = makeWorld("Raidertwo", false)
+    ml.addon._rollBannerAccept = true
+    raider.addon._rollBannerAccept = true
+    startSession(ml)
+    setBag(ml, 40005, 1); bagUpdate(ml)
+    local lot = openLot(ml, 40005)
+    ml.addon:BroadcastSession(); flushWireTo(raider)
+    ml.addon:StartLiveRoll(lot.id)
+    local realGetItemInfo = raider.env.GetItemInfo
+    raider.env.GetItemInfo = function() return nil end   -- raider has never seen the item
+    flushWireTo(raider)
+    local card = cardFor(raider, lot.id)
+    check(card, "the raider still got a card")
+    eq(card.link, "item:40005", "bare item:id stands in for the missing link")
+    check(card.fallbackName ~= nil and card.fallbackName ~= "", "a fallback name rides along")
+
+    -- the cache resolves (server answered the prime): the ticker re-renders the card in place
+    raider.env.GetItemInfo = realGetItemInfo
+    pump(raider, 0.3)
+    local refresh = raider.addon._rollBannerRefreshes[#raider.addon._rollBannerRefreshes]
+    check(refresh and refresh.key == lot.id, "the card was refreshed once the item resolved")
+    check(refresh.link and refresh.link ~= "item:40005", "the refresh carries the real link")
+end)
+
 test("ineligible class: roll brackets are DISABLED (not just message-guarded)", function()
     clearWire()
     local ml = makeWorld("Masterlooter", true)

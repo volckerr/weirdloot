@@ -396,6 +396,29 @@ function self.makeWorld(playerName, isML)
     addon._bannerItems = {}
     addon.AddLootBannerItem = function(_, item) addon._bannerItems[#addon._bannerItems + 1] = item end
     addon.ShowLootBanner = function() end
+    -- roll cards (the drops banner): record adds/closes/choice-syncs so the live-wiring tests can
+    -- assert them. The banner is the default roll surface in-game; the harness default REFUSES
+    -- cards so the long-standing popup battery keeps exercising the fallback popup path unchanged.
+    -- Card-path tests opt in with _rollBannerAccept = true.
+    addon._rollBannerItems = {}
+    addon._rollBannerClosed = {}
+    addon._rollBannerChoices = {}
+    addon._rollBannerAccept = false
+    addon.AddRollBannerItem = function(_, item)
+        if not addon._rollBannerAccept then return false end
+        addon._rollBannerItems[#addon._rollBannerItems + 1] = item
+        return true
+    end
+    addon.CloseRollBannerCard = function(_, key)
+        addon._rollBannerClosed[#addon._rollBannerClosed + 1] = key
+    end
+    addon._rollBannerRefreshes = {}
+    addon.RefreshRollBannerCard = function(_, key, link, icon)
+        addon._rollBannerRefreshes[#addon._rollBannerRefreshes + 1] = { key = key, link = link, icon = icon }
+    end
+    addon.SetRollBannerCardChoice = function(_, key, bracket)
+        addon._rollBannerChoices[#addon._rollBannerChoices + 1] = { key = key, bracket = bracket }
+    end
     addon:PLAYER_LOGIN()
     if os.getenv("WLDEBUG") then env.WeirdLootDB.payoutDebug = true end
     local shippedDefaults = {
