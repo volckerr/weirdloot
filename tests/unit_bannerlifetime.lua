@@ -124,6 +124,23 @@ test("clicking the close button dismisses that row", function()
     check(not row.alive, "the row was dismissed and removed")
 end)
 
+test("mousing over a card after hitting its X does not hold its hiding animation open", function()
+    -- The reading-pause hover freezes a COUNTING won row so its text can be read; it must not also
+    -- freeze a row the user already dismissed with the X (that would strand a card the user sent away).
+    local w = bannerWorld(true, function(opt)
+        opt.forceKeepResultPopup = true
+        opt.resultPopupAutoCloseEnabled = true
+        opt.resultPopupAutoCloseSeconds = 10
+    end)
+    local row = showWonRow(w)
+    check(row.CloseButton:IsShown(), "ML close button shown")
+    row.CloseButton:GetScript("OnClick")(row.CloseButton)   -- hit the X: the row starts fading
+    check(row.fading, "the row is fading after the X")
+    awarded(w).showingTooltip = true                        -- now hover it (the reading-pause path)
+    pumpN(w, 0.05, 4)                                        -- the fade must still run to completion
+    check(not row.alive, "the hover did not hold the dismissed card open; it finished hiding")
+end)
+
 test("no-winner card: shows a reroll button that fires its callback and dismisses the card", function()
     local w = bannerWorld(true, function(opt)
         opt.forceKeepResultPopup = true
