@@ -464,6 +464,10 @@ function addon:RefreshUI()
     self:UpdateMinimapOwedGlow()
     self:UpdateMinimapTradeStatus()
     self:UpdateMinimapMLActive()
+    -- The "N more to roll" strip lives on the banner, not the main window, so refresh it before the
+    -- early-out below: it must track the ledger (fresh drops, rolls, resolves, and raider syncs, which
+    -- all route through here) even while the main window is closed.
+    if self.RefreshRollsLeftBanner then self:RefreshRollsLeftBanner() end
     if not self.ui or not self.ui.frame then
         return
     end

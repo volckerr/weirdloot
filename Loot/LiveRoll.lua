@@ -417,6 +417,25 @@ function addon:ShouldSuppressRollPopup(roll)
     end
     return false
 end
+
+-- How many more roll cards THIS client will still see: queued lots (surfaced/pending/snoozed, not
+-- idle-background, rolling, or resolved) minus the ones this player's own filters suppress. Reuses
+-- ShouldSuppressRollPopup, so the count matches the cards that actually appear: the loot master (never
+-- suppressed) sees every queued lot; a raider sees only those its whitelist/blacklist and "hide rolls my
+-- class can't use" option let through. Derived from the local (replicated) ledger, so ML and raiders
+-- each show their own personally-relevant number.
+function addon:CountUpcomingRolls()
+    local core = self.lootCore
+    if not core then return 0 end
+    local n = 0
+    for _, lot in ipairs(core:QueuedLots()) do
+        local name = util:ItemRender(lot.itemId)
+        if not self:ShouldSuppressRollPopup({ itemId = lot.itemId, name = name }) then
+            n = n + 1
+        end
+    end
+    return n
+end
 local popupBasePoint, savePopupBasePoint, layoutPopups
 
 local function makeButton(parent, text, width)

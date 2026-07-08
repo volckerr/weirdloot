@@ -23,6 +23,7 @@ local BB_EXPAND_TIME = 0.25         -- time to expand per item
 local WON_ROW_H = 44                -- win card: icon + name + winner line
 local DROP_ROW_H = 62               -- roll card is taller: name + prio line + bracket buttons
 local ROW_GAP = 2                   -- vertical gap between stacked rows
+local ROLLS_LEFT_H = 18             -- the "N waiting to roll" footer strip: a short row, not a full card
 local BADGE_SIZE = 20               -- minimalist per-card badge (dice/bag), a small top-left corner emblem
 local MINIMAL_PAD = 6               -- minimalist top/bottom padding (no chrome to reserve)
 local MINIMAL_BG_BOOST = 0.4        -- minimalist-only second pass of the row art: no dark chrome behind the
@@ -1308,6 +1309,19 @@ local function buildBanner(bannerName, medallionCfg)
                 prev = f
             end
         end
+        -- the "N waiting to roll" strip rides as a short footer row INSIDE the banner, so it seats within
+        -- the bottom chrome and the chrome closes up around its short height (not a full card's worth).
+        local strip = self.rollsLeftStrip
+        if strip and strip:IsShown() then
+            strip:ClearAllPoints()
+            if prev then
+                strip:SetPoint("TOP", prev, "BOTTOM", 0, -ROW_GAP)
+            else
+                strip:SetPoint("TOP", self, "TOP", 0, self.minimal and -MINIMAL_PAD or -84)
+            end
+            count = count + 1
+            rowsTotal = rowsTotal + ROLLS_LEFT_H
+        end
         local gaps = max(count - 1, 0) * ROW_GAP
         if self.minimal then
             -- no chrome: height is just the rows + a little padding top and bottom
@@ -1319,6 +1333,7 @@ local function buildBanner(bannerName, medallionCfg)
         end
         return count
     end
+    BossBanner.RelayoutRows = relayoutAliveRows   -- exposed so the footer strip can trigger a re-layout
 
     function aliveRowCount(self)
         local n = 0
@@ -1471,9 +1486,10 @@ local function buildBanner(bannerName, medallionCfg)
         local removed, stillCounting = false, 0
         for _, f in ipairs(self.LootFrames) do
             if f.alive then
-                if paused and not f.rollDuration then
-                    stillCounting = stillCounting + 1   -- won row held for reading: alive, not done
-                elseif f.fading then
+                if f.fading then
+                    -- An explicitly dismissed card (X / bracket dismiss / wire close) always finishes its
+                    -- fade, even under the reading-pause hover: the user already sent it away, so mousing
+                    -- over it must not hold it open. A NON-fading won row is still paused for reading below.
                     f.fadeLeft = f.fadeLeft - elapsed
                     if f.fadeLeft <= 0 then
                         rbDbg(("RM idx=%s rd=%s"):format(tostring(f.__idx), tostring(f.rollDuration)))
@@ -1491,6 +1507,8 @@ local function buildBanner(bannerName, medallionCfg)
                     else
                         f:SetAlpha(f.fadeLeft / ROW_FADE_TIME)
                     end
+                elseif paused and not f.rollDuration then
+                    stillCounting = stillCounting + 1   -- won row held for reading: alive, not done
                 else
                     if f.getTimeLeft then
                         -- live feed: the roll's own deadline is the clock. Guard nil (a thunk whose
@@ -1904,13 +1922,39 @@ end
 enableRegionDrag(dropsBanner)
 enableRegionDrag(awardedBanner)
 
+-- "N waiting to roll" strip: a compact, non-interactive footer telling THIS client how many more roll
+-- cards are still coming (its own filtered count from addon:CountUpcomingRolls). It is a SHORT row inside
+-- the drops banner (dropsBanner.rollsLeftStrip); relayoutAliveRows lays it out as the last row, so it
+-- seats within the bottom chrome and the chrome closes up around its short height in both looks. Mouse
+-- stays disabled so it never blocks a drag on the banner behind it.
+local rollsLeftBanner = CreateFrame("Frame", "WeirdLootRollsLeftBanner", dropsBanner)
+rollsLeftBanner:SetSize(269, ROLLS_LEFT_H)
+rollsLeftBanner:SetBackdrop({
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 12,
+    insets = { left = 3, right = 3, top = 3, bottom = 3 },
+})
+-- Grey-item (poor quality) coloration, the same tint a grey item card uses, so the strip reads as a
+-- muted, low-key card rather than competing with the real loot. The fallback covers the headless test
+-- env, which only stubs the epic quality entry.
+local POOR = ITEM_QUALITY_COLORS[0] or { r = 0.62, g = 0.62, b = 0.62 }
+rollsLeftBanner:SetBackdropColor(0.06, 0.05, 0.03, 0.9)
+rollsLeftBanner:SetBackdropBorderColor(POOR.r, POOR.g, POOR.b, 1)
+rollsLeftBanner.text = rollsLeftBanner:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+rollsLeftBanner.text:SetPoint("CENTER", rollsLeftBanner, "CENTER", 0, 0)
+rollsLeftBanner.text:SetTextColor(POOR.r, POOR.g, POOR.b)
+rollsLeftBanner:Hide()               -- shown by RefreshRollsLeftBanner when the count is above zero
+dropsBanner.rollsLeftStrip = rollsLeftBanner
+
 local function layoutRegion()
     restoreRegionPosition()
     dropsBanner:ClearAllPoints()
     dropsBanner:SetPoint("TOP", bannerRegion, "TOP", 0, 0)
     awardedBanner:ClearAllPoints()
     if dropsBanner:IsShown() then
-        -- full mode overlaps into the drops footer chrome; minimalist has none, so just leave a small gap
+        -- full mode overlaps into the drops footer chrome; minimalist has none, so just leave a small gap.
+        -- The drops banner's height already includes the footer strip (relayoutAliveRows), so the win
+        -- banner lands just below the strip automatically.
         local gap = bannerMinimal() and -MINIMAL_PAD or REGION_OVERLAP
         awardedBanner:SetPoint("TOP", dropsBanner, "BOTTOM", 0, gap)   -- moves as drops resizes
     else
@@ -1920,6 +1964,23 @@ end
 dropsBanner.onLayoutChanged = layoutRegion
 awardedBanner.onLayoutChanged = layoutRegion
 layoutRegion()
+
+-- Refresh the strip from this client's upcoming-roll count: hidden at zero, otherwise "Still N
+-- item(s) waiting to roll...". Toggling it changes the drops banner's row layout, so re-lay-out the rows
+-- (which resizes the banner) and re-anchor the region. Cheap; safe to call on every UI refresh and card
+-- change.
+function addon:RefreshRollsLeftBanner()
+    local n = self:CountUpcomingRolls()
+    if n > 0 then
+        -- the count in a gentle green; the rest keeps the grey (poor-quality) base color set above
+        rollsLeftBanner.text:SetText(("Still |cff8fd98f%d|r %s waiting to roll..."):format(n, n == 1 and "item" or "items"))
+        rollsLeftBanner:Show()
+    else
+        rollsLeftBanner:Hide()
+    end
+    if dropsBanner.RelayoutRows then dropsBanner:RelayoutRows() end
+    layoutRegion()
+end
 
 local bannerAnchorPreview   -- the config-anchor placeholder (built lazily by SetLootBannerAnchorShown)
 
@@ -2035,7 +2096,9 @@ function addon:AddLootBannerItem(item)
 end
 
 function addon:AddRollBannerItem(item)
-    return dropsBanner:AddItem(item)
+    local ok = dropsBanner:AddItem(item)
+    self:RefreshRollsLeftBanner()   -- the lot just left "upcoming" for a live card; recount
+    return ok
 end
 
 -- Close a live roll card by its key (the lot id): WIN, CANCEL, or any wire-side end of the roll.
@@ -2050,6 +2113,7 @@ function addon:CloseRollBannerCard(key)
             f.FadeOutNow()
         end
     end
+    self:RefreshRollsLeftBanner()   -- a card ended (resolved/cancelled); the count may have changed
 end
 
 -- Re-render a card's item visuals in place once a cold item cache resolves (the live feed's name

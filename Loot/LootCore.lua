@@ -631,6 +631,23 @@ function LootCore:All() -- every lot in mint order (for the snapshot wire)
     return out
 end
 
+-- Lots queued to be rolled: surfaced, pending, or snoozed (new/pending/skipped). Deliberately EXCLUDES
+-- idle: idle is background bag content that is listed but never auto-surfaced -- loot baselined at
+-- session start, or a copy re-derived from the bag scan on reload (e.g. an item the raid already rolled
+-- and passed on, still sitting in the ML's bags) -- which is not a roll the raid still owes. Also
+-- excludes rolling (here now) and resolved (done). Mint order. Feeds the "N more to roll" hint (which
+-- then applies the viewer's own roll filters on top).
+function LootCore:QueuedLots()
+    local out = {}
+    for i = 1, #self.order do
+        local l = self.lots[self.order[i]]
+        if l and not l.removed and (l.state == STATE.NEW or l.state == STATE.PENDING or l.state == STATE.SKIPPED) then
+            out[#out + 1] = l
+        end
+    end
+    return out
+end
+
 -- ---------------------------------------------------------------------------
 -- sync (core owns the snapshot shape; Comm owns the wire)
 -- ---------------------------------------------------------------------------
