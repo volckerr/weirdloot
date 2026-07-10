@@ -250,6 +250,78 @@ test("reroll: UnlockSessionRoll unlocks one resolved lot and retracts its owe", 
     eq(owedCount(w), 0, "reroll forgave the owe")
 end)
 
+test("reroll: UnlockSessionRoll broadcasts a CANCEL for the lot and clears the ML's own roll record", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    setBag(w, 40005, 1); bagUpdate(w)
+    local lot = openLot(w, 40005)
+    w.addon:StartLiveRoll(lot.id)
+    w.addon:RegisterInterest(lot.id, "Alice", "ms")
+    w.addon:ResolveLiveRoll(lot.id)
+    local cancels = {}
+    local origSend = w.addon.SendLargeMessage
+    w.addon.SendLargeMessage = function(self, command, values, ...)
+        if command == "CANCEL" then cancels[#cancels + 1] = values[1] end
+        return origSend(self, command, values, ...)
+    end
+    w.addon:UnlockSessionRoll(lot.id)
+    w.addon.SendLargeMessage = origSend
+    eq(#cancels, 1, "exactly one CANCEL broadcast on unlock")
+    eq(cancels[1], lot.id, "the CANCEL names the unlocked lot")
+    check(not (w.addon.live and w.addon.live.rolls and w.addon.live.rolls[lot.id]),
+          "ML's own live roll record cleared on unlock")
+end)
+
+test("reroll: Unlock-All broadcasts a CANCEL for every resolved lot", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    setBag(w, 40005, 1); bagUpdate(w)
+    local a = openLot(w, 40005)
+    w.addon:StartLiveRoll(a.id); w.addon:RegisterInterest(a.id, "Alice", "ms"); w.addon:ResolveLiveRoll(a.id)
+    setBag(w, 40006, 1); bagUpdate(w)
+    local b = openLot(w, 40006)
+    w.addon:StartLiveRoll(b.id); w.addon:RegisterInterest(b.id, "Bob", "ms"); w.addon:ResolveLiveRoll(b.id)
+    local cancels = {}
+    local origSend = w.addon.SendLargeMessage
+    w.addon.SendLargeMessage = function(self, command, values, ...)
+        if command == "CANCEL" then cancels[#cancels + 1] = values[1] end
+        return origSend(self, command, values, ...)
+    end
+    w.addon:UnlockAllRolls()
+    w.addon.SendLargeMessage = origSend
+    eq(#cancels, 2, "one CANCEL per resolved lot on Unlock-All")
+    local seen = {}; for _, id in ipairs(cancels) do seen[id] = true end
+    check(seen[a.id] and seen[b.id], "both unlocked lots were retracted")
+    eq(w.addon.lootCore:State(a.id), "idle", "lot A idle after Unlock-All")
+    eq(w.addon.lootCore:State(b.id), "idle", "lot B idle after Unlock-All")
+end)
+
+-- An LC (loot-council) item resolves to the council, not a roll winner, so the record carries no
+-- winners. The banner must show a Loot Council card (matching the Loot Results tab), NOT the "no one
+-- rolled" / reroll card, even though people rolled.
+test("LC banner: an LC item resolves to a Loot Council card, not 'no one rolled'", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    check(w.addon:SetSessionLCOverride("Blade of Test", "lc"), "LC override set for the item")
+    setBag(w, 40005, 1); bagUpdate(w)
+    local lot = openLot(w, 40005)
+    w.addon:StartLiveRoll(lot.id)
+    w.addon:RegisterInterest(lot.id, "Masterlooter", "bis")   -- ML rolls BiS
+    w.addon:RegisterInterest(lot.id, "Alice", "ms")           -- raider (relayed) rolls MS
+    local captured, winMode
+    local origAdd, origSend = w.addon.AddLootBannerItem, w.addon.SendLargeMessage
+    w.addon.AddLootBannerItem = function(self, item) captured = item; return origAdd(self, item) end
+    w.addon.SendLargeMessage = function(self, command, values, ...)
+        if command == "WIN" then winMode = values[4] end
+        return origSend(self, command, values, ...)
+    end
+    w.addon:ResolveLiveRoll(lot.id)
+    w.addon.AddLootBannerItem, w.addon.SendLargeMessage = origAdd, origSend
+    check(captured and captured.lootCouncil, "banner item is a Loot Council card")
+    check(not (captured and captured.noWinner), "not the no-one-rolled card")
+    eq(winMode, "lc", "WIN message carries result mode 'lc'")
+end)
+
 test("reroll: UnlockSessionRoll only affects the target lot, not other resolved lots", function()
     local w = makeWorld("Masterlooter", true)
     startSession(w)
@@ -611,6 +683,49 @@ local function rollWithRaider(itemId)
     ml.addon:StartLiveRoll(lot.id); flushWireTo(raider) -- DROP -> raider's interest popup
     return ml, raider, lot
 end
+
+-- The Obsidian Greathelm no-winner reproduction: a raider who rolled the first time must be able to
+-- roll again on a reroll. Before the CANCEL-on-unlock fix the raider kept a resolved roll record, so
+-- the reroll DROP was discarded, the popup never reopened, no response reached the ML, and End
+-- resolved with no rollers. The CANCEL clears that record so the fresh DROP opens a new popup.
+test("reroll: a raider re-rolls after unlock and the reroll resolves to a winner", function()
+    local ml, raider, lot = rollWithRaider(40005)
+    check(rollFor(raider, lot.id), "raider has an open roll for the first roll")
+
+    -- first roll: raider picks MS, ML resolves, WIN closes the raider's popup (record stays resolved)
+    raider.addon:SetPlayerResponse(lot.id, "Raidertwo", "ms"); flushWireTo(ml)
+    ml.addon:ResolveLiveRoll(lot.id); flushWireTo(raider)
+    check(rollFor(raider, lot.id) and rollFor(raider, lot.id).resolved, "raider's record is resolved after the win")
+
+    -- reroll: unlock broadcasts CANCEL -> raider drops its stale resolved record
+    ml.addon:UnlockSessionRoll(lot.id); flushWireTo(raider)
+    check(rollFor(raider, lot.id) == nil, "CANCEL cleared the raider's resolved record")
+
+    -- second DROP opens a fresh popup the raider can act on
+    ml.addon:StartLiveRoll(lot.id); flushWireTo(raider)
+    local reroll = rollFor(raider, lot.id)
+    check(reroll and not reroll.resolved, "raider has a fresh unresolved roll after the reroll DROP")
+
+    -- raider re-picks MS; the response reaches the ML and End resolves to a real winner
+    raider.addon:SetPlayerResponse(lot.id, "Raidertwo", "ms"); flushWireTo(ml)
+    ml.addon:ResolveLiveRoll(lot.id)
+    local award = ml.addon.lootCore:Get(lot.id)
+    eq(ml.addon.lootCore:State(lot.id), "resolved", "reroll resolved")
+    check(award.awards and award.awards[1] and award.awards[1].winner == "Raidertwo",
+          "the reroll recorded Raidertwo as the winner (no more empty no-winner resolve)")
+end)
+
+test("LC banner: a raider renders a Loot Council card from a WIN with mode 'lc'", function()
+    local ml, raider, lot = rollWithRaider(40005)
+    local captured
+    local origAdd = raider.addon.AddLootBannerItem
+    raider.addon.AddLootBannerItem = function(self, item) captured = item; return origAdd(self, item) end
+    -- WIN wire: { lotId, itemId, winnersText (empty for LC), mode, "0", sectionsText }
+    raider.addon:OnWinMessage({ lot.id, tostring(40005), "", "lc", "0", "" })
+    raider.addon.AddLootBannerItem = origAdd
+    check(captured and captured.lootCouncil, "raider shows a Loot Council card for a mode-lc WIN")
+    check(not (captured and captured.noWinner), "not a no-winner card")
+end)
 
 test("live pick list: a raider sees who is rolling via RSTATE", function()
     local ml, raider, lot = rollWithRaider(40005)
