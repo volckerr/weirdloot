@@ -855,6 +855,19 @@ end
 
 -- Unlock a single resolved lot for reroll. Goes through the core's per-lot Unlock so the
 -- ledger change retracts any owe (payout) and broadcasts via the normal ledgerChanged path.
+-- Retract a roll from the raid when the ML unlocks a resolved lot for reroll. After a win each raider
+-- keeps its roll record with resolved = true (OnWinMessage, on purpose, to reject late/duplicate
+-- DROPs), so a re-DROP for the same lot is dropped by OnDropMessage's resolved guard and
+-- SyncRollPopups won't restore it (a record still exists). The reroll would then be invisible to the
+-- raid: no fresh popup, no one can respond, and End resolves with no rollers. CANCEL is the signal
+-- that clears that record (OnCancelMessage), exactly as the manual Cancel + Start does; the following
+-- DROP then opens a fresh popup. Clear our own record too, since a client never receives its own RAID
+-- message. Both unlock paths (single reroll and Unlock-All) route through here so raiders stay in step.
+function addon:RetractRollForReroll(lotId)
+    if self.live and self.live.rolls then self.live.rolls[lotId] = nil end
+    self:SendLargeMessage("CANCEL", { lotId }, "RAID", nil, "ALERT")
+end
+
 function addon:UnlockSessionRoll(lotId)
     if not self:IsAuthorizedLootMaster() then
         self:Print("Only the loot master can unlock rolled loot.")
@@ -864,6 +877,7 @@ function addon:UnlockSessionRoll(lotId)
         self:Print("That item is not in a resolved state; nothing to reroll.")
         return false
     end
+    self:RetractRollForReroll(lotId)
     self:TriggerCallback("RESULTS_UPDATED")
     self:Print("Unlocked for reroll.")
     return true
@@ -880,7 +894,13 @@ function addon:UnlockAllRolls()
         return false
     end
 
+    -- Capture the lots being unlocked BEFORE UnlockAll clears their resolved state, so each gets its
+    -- retract CANCEL (see RetractRollForReroll). Otherwise Unlock-All would leave every raider holding
+    -- a stale resolved record and re-rolling any of those lots afterward would be invisible to the raid.
+    local unlocked = {}
+    for _, lot in ipairs(self.lootCore:Resolved()) do unlocked[#unlocked + 1] = lot.id end
     self.lootCore:UnlockAll() -- ledgerChanged -> projections + snapshot broadcast
+    for _, lotId in ipairs(unlocked) do self:RetractRollForReroll(lotId) end
     self:TriggerCallback("RESULTS_UPDATED")
     self:Print("All loot unlocked for reroll.")
     return true
