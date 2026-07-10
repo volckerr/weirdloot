@@ -1853,7 +1853,10 @@ local function rollsFromSections(self, sections)
     return rolls
 end
 
-function addon:BannerItemFromResult(roll, winners, sections)
+-- lcDecision: a loot-council award has no roll winner, so the winner line reads "<name> LC Decision"
+-- (no roll shown) instead of the winner's own roll + bracket. The roll breakdown (rolls) still carries
+-- the full roster for the hover, so who rolled what is not lost.
+function addon:BannerItemFromResult(roll, winners, sections, lcDecision)
     local rolls = rollsFromSections(self, sections)
 
     -- One winner entry per awarded copy, each enriched with their roll + bracket from the breakdown so a
@@ -1862,10 +1865,14 @@ function addon:BannerItemFromResult(roll, winners, sections)
     for _, wname in ipairs(winners or {}) do
         local wkey = util:NormalizeKey(wname)
         local section, roll
-        for _, r in ipairs(rolls) do
-            if util:NormalizeKey(r.name) == wkey then
-                section, roll = r.section, r.roll
-                break
+        if lcDecision then
+            section = "LC Decision"
+        else
+            for _, r in ipairs(rolls) do
+                if util:NormalizeKey(r.name) == wkey then
+                    section, roll = r.section, r.roll
+                    break
+                end
             end
         end
         winnerList[#winnerList + 1] = {
@@ -1988,7 +1995,7 @@ function addon:ShowLootCouncilCard(lotId)
 
     if remaining == 0 and #awarded > 0 then
         local pseudo = { id = lotId, link = link, icon = icon, quantity = total, name = name }
-        self:AddLootBannerItem(self:BannerItemFromResult(pseudo, awarded, sections))
+        self:AddLootBannerItem(self:BannerItemFromResult(pseudo, awarded, sections, true))   -- LC Decision winner line
         return
     end
 
@@ -2021,7 +2028,7 @@ function addon:AwardLootCouncilCopy(lotId, winner)
         if a.winner then winners[#winners + 1] = a.winner end
     end
     self:SendLargeMessage("WIN", {
-        lotId, tostring(lot.itemId or 0), table.concat(winners, ","), "roll", "0", self:EncodeSections(sections),
+        lotId, tostring(lot.itemId or 0), table.concat(winners, ","), "lcwin", "0", self:EncodeSections(sections),
     }, "RAID", nil, "ALERT")
     self:TriggerCallback("RESULTS_UPDATED")
     self:ShowLootCouncilCard(lotId)
@@ -2143,7 +2150,7 @@ function addon:OnRspMessage(sender, fields)
 end
 
 function addon:OnWinMessage(fields)
-    -- wire: { lotId, itemId, winnersText, mode ("roll"|"lc"), "0", sectionsText }
+    -- wire: { lotId, itemId, winnersText, mode ("roll"|"lc"|"lcwin"), "0", sectionsText }
     local rollId, itemId, winnersText, mode, sectionsText = fields[1], tonumber(fields[2]), fields[3], fields[4], fields[6]
     local roll = self.live.rolls[rollId]
     self:LogCoreEvent("recv-win", { id = rollId, item = itemId, hasPopup = (roll and roll.popup) ~= nil })
@@ -2171,7 +2178,9 @@ function addon:OnWinMessage(fields)
     if not suppressed then
         local sections = self:DecodeSections(sectionsText)
         if mode == "lc" then
-            self:AddLootBannerItem(self:BannerLootCouncilItem(roll, sections))
+            self:AddLootBannerItem(self:BannerLootCouncilItem(roll, sections))     -- council deciding, no winner yet
+        elseif mode == "lcwin" then
+            if #winners > 0 then self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections, true)) end  -- LC Decision
         elseif #winners > 0 then
             self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))
         end

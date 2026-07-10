@@ -349,20 +349,26 @@ test("LC award: awarding a candidate owes them and broadcasts a normal WIN", fun
     w.addon:RegisterInterest(lot.id, "Alice", "ms")
     w.addon:ResolveLiveRoll(lot.id)
     eq(owedCount(w), 0, "nothing owed before the ML awards")
-    local winText, winMode
-    local origSend = w.addon.SendLargeMessage
+    local winText, winMode, banner
+    local origSend, origBanner = w.addon.SendLargeMessage, w.addon.AddLootBannerItem
     w.addon.SendLargeMessage = function(self, command, values, ...)
         if command == "WIN" then winText, winMode = values[3], values[4] end
         return origSend(self, command, values, ...)
     end
+    w.addon.AddLootBannerItem = function(self, item) banner = item; return origBanner(self, item) end
     w.addon:AwardLootCouncilCopy(lot.id, "Alice")
-    w.addon.SendLargeMessage = origSend
+    w.addon.SendLargeMessage, w.addon.AddLootBannerItem = origSend, origBanner
     local award = w.addon.lootCore:Get(lot.id).awards[1]
     eq(award.winner, "Alice", "copy 1 awarded to Alice")
     eq(award.state, "owed", "a non-ML award is OWED")
     eq(owedCount(w), 1, "Alice is now owed the item")
-    eq(winMode, "roll", "award broadcasts a normal-mode WIN (raid win card)")
+    eq(winMode, "lcwin", "award broadcasts an LC-decision WIN (raid win card)")
     check(winText and string.find(winText, "Alice"), "WIN names the winner")
+    -- the collapsed win card shows the winner with an "LC Decision" line, not their roll
+    check(banner and banner.winners and banner.winners[1], "a win card was shown for the award")
+    eq(banner.winners[1].name, "Alice", "the win card names the awarded winner")
+    eq(banner.winners[1].section, "LC Decision", "the winner line reads LC Decision, not a roll bracket")
+    check(banner.winners[1].roll == nil, "no roll number is shown for an LC decision")
 end)
 
 test("LC award: awarding the ML is a self-win (RESOLVED, nothing owed)", function()
