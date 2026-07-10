@@ -26,7 +26,7 @@ local ROW_GAP = 2                   -- vertical gap between stacked rows
 local ROLLS_LEFT_H = 18             -- the "N waiting to roll" footer strip: a short row, not a full card
 local BADGE_SIZE = 20               -- minimalist per-card badge (dice/bag), a small top-left corner emblem
 local MINIMAL_PAD = 6               -- minimalist top/bottom padding (no chrome to reserve)
-local MINIMAL_BG_BOOST = 0.4        -- minimalist-only second pass of the row art: no dark chrome behind the
+local MINIMAL_BG_BOOST = 0.6        -- minimalist-only second pass of the row art: no dark chrome behind the
                                     -- cards, so thicken the colored background slightly (alpha of the extra layer)
 
 -- Loot banner look/behavior, all read straight from db.options (the Options tab writes them; the
