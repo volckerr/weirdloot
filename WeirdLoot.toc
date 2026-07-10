@@ -2,7 +2,7 @@
 ## Title: WeirdLoot
 ## Notes: Live loot co-ordination for Weird Vibes raids
 ## Author: Volcker
-## Version: 1.2.14
+## Version: 1.2.15
 ## IconTexture: Interface\AddOns\WeirdLoot\Textures\weirdloot
 ## SavedVariables: WeirdLootDB, WeirdLootSessionDB
 ## SavedVariablesPerCharacter: WeirdLootCharDB, WeirdLootDebugLog

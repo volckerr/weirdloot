@@ -1769,7 +1769,7 @@ function addon:ResolveLiveRoll(rollId)
 
     self:CloseInterestPopup(roll)
     if isLootCouncil then
-        self:AddLootBannerItem(self:BannerLootCouncilItem(roll, sections))
+        self:ShowLootCouncilCard(rollId)   -- ML card with the award flyout; raiders got the "lc" WIN above
     elseif #winners > 0 then
         self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))
     else
@@ -1909,10 +1909,9 @@ function addon:BannerNoWinnerItem(roll)
     }
 end
 
--- A loot-council win card: an LC item resolves to the council rather than a roll winner, so the card
--- reads "Loot Council" and shows the full roller breakdown, instead of the misleading "no one rolled"
--- card. No reroll button: the item was not left unrolled, it went to the council. The per-candidate
--- award action the ML clicks to pick the recipient is TODO item 38 (the award dialog).
+-- The base loot-council win card: reads "Loot Council" and shows the full roller breakdown instead of
+-- the misleading "no one rolled" card. This is what RAIDERS render (from the WIN "lc" mode); the ML
+-- enriches it with the award flyout in ShowLootCouncilCard.
 function addon:BannerLootCouncilItem(roll, sections)
     return {
         key = roll.id,
@@ -1922,6 +1921,110 @@ function addon:BannerLootCouncilItem(roll, sections)
         lootCouncil = true,
         rolls = rollsFromSections(self, sections),
     }
+end
+
+-- The award-candidate list for an LC card (ML only): every roller (bracket + roll), in bracket-priority
+-- order, PLUS any named-rule candidate who is in the raid but did not roll (no roll, tagged "Named").
+-- Clicking a row awards the next copy to that person (AwardLootCouncilCopy).
+function addon:LootCouncilCandidates(itemName, sections)
+    local list, seen = {}, {}
+    for _, s in ipairs(sections or {}) do
+        for _, m in ipairs(s.members) do
+            local key = util:NormalizeKey(m.name)
+            if not seen[key] then
+                seen[key] = true
+                list[#list + 1] = {
+                    name = m.name,
+                    class = getPlayerClassName(self, key),
+                    roll = m.roll,
+                    bracket = m.isNamed and "LC Prio" or s.label,
+                    isNamed = m.isNamed or false,
+                }
+            end
+        end
+    end
+    local rule = self:GetNamedRule(itemName)
+    if rule and rule.tiers then
+        for _, tier in ipairs(rule.tiers) do
+            for _, entry in ipairs(tier.entries or {}) do
+                if not entry.isRest and entry.playerKey then
+                    local key = util:NormalizeKey(entry.playerKey)
+                    local att = not seen[key] and self:GetAttendee(key) or nil   -- only if present in the raid
+                    if att then
+                        seen[key] = true
+                        list[#list + 1] = {
+                            name = att.name or entry.playerKey,
+                            class = att.className,
+                            roll = nil,
+                            bracket = "Named",
+                            isNamed = true,
+                        }
+                    end
+                end
+            end
+        end
+    end
+    return list
+end
+
+-- Show/refresh the ML's LC win card for a resolved lot. While copies remain unassigned it carries the
+-- award flyout (candidates + per-copy pick); once every copy has a winner it collapses to a normal win
+-- card. Built from the lot (not the transient roll) so it can re-render after each award. ML only.
+function addon:ShowLootCouncilCard(lotId)
+    local core = self.lootCore
+    local lot = core:Get(lotId); if not lot then return end
+    local name, link, icon = util:ItemRender(lot.itemId)
+    local sections = self:SectionsFromResult(lot.record or {})
+    local total = #(lot.awards or {})
+
+    local awarded, remaining = {}, 0
+    for _, a in ipairs(lot.awards or {}) do
+        if a.winner then
+            awarded[#awarded + 1] = a.winner
+        elseif a.state == core.AWARD.RESOLVED or a.state == core.AWARD.OWED then
+            remaining = remaining + 1
+        end
+    end
+
+    if remaining == 0 and #awarded > 0 then
+        local pseudo = { id = lotId, link = link, icon = icon, quantity = total, name = name }
+        self:AddLootBannerItem(self:BannerItemFromResult(pseudo, awarded, sections))
+        return
+    end
+
+    local item = self:BannerLootCouncilItem({ id = lotId, link = link, icon = icon, quantity = total }, sections)
+    item.candidates = self:LootCouncilCandidates(name, sections)
+    item.copiesTotal = total
+    item.copiesRemaining = remaining
+    item.awarded = awarded
+    item.onAward = function(who) self:AwardLootCouncilCopy(lotId, who) end
+    item.onReroll = function()
+        if self:UnlockSessionRoll(lotId) then self:StartLiveRoll(lotId) end
+    end
+    self:AddLootBannerItem(item)
+end
+
+-- ML clicks a candidate on the LC card: award the next copy to them through the normal win machinery.
+-- AwardCopy fills one copy (payout owes it via lotAwarded, sync carries the award), then we broadcast a
+-- normal WIN with every winner assigned so far so the raid gets the standard win card, and re-render the
+-- ML card (advance the flyout or collapse once all copies are awarded).
+function addon:AwardLootCouncilCopy(lotId, winner)
+    if not self:IsAuthorizedLootMaster() then return end
+    local core = self.lootCore
+    local lot = core:Get(lotId)
+    if not lot or lot.state ~= core.STATE.RESOLVED then return end
+    if not core:AwardCopy(lotId, winner) then return end
+
+    local sections = self:SectionsFromResult(lot.record or {})
+    local winners = {}
+    for _, a in ipairs(lot.awards or {}) do
+        if a.winner then winners[#winners + 1] = a.winner end
+    end
+    self:SendLargeMessage("WIN", {
+        lotId, tostring(lot.itemId or 0), table.concat(winners, ","), "roll", "0", self:EncodeSections(sections),
+    }, "RAID", nil, "ALERT")
+    self:TriggerCallback("RESULTS_UPDATED")
+    self:ShowLootCouncilCard(lotId)
 end
 
 -- pack sections for WIN: "label~name=roll,name=roll" joined by ";"

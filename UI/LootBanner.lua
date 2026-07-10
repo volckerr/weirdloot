@@ -246,6 +246,70 @@ local function anchorMLButtons(frame)
     end
 end
 
+-- LC award flyout: pooled clickable candidate rows live on the card's LCFlyout panel (built in
+-- createLootFrame). Each row awards the next copy to that candidate.
+local FLYOUT_ROW_H = 15
+local function lcFlyoutRow(frame, i)
+    local row = frame.LCRows[i]
+    if not row then
+        row = CreateFrame("Button", nil, frame.LCFlyout)
+        row:SetHeight(FLYOUT_ROW_H)
+        row.text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        row.text:SetPoint("LEFT", row, "LEFT", 3, 0)
+        row.text:SetJustifyH("LEFT")
+        local hl = row:CreateTexture(nil, "HIGHLIGHT")
+        hl:SetAllPoints()
+        hl:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+        hl:SetBlendMode("ADD")
+        hl:SetAlpha(0.5)
+        frame.LCRows[i] = row
+    end
+    return row
+end
+
+-- Fill and show the loot master's LC award flyout: header ("Award copy k of N"), one clickable row per
+-- candidate (class-colored name, roll or "-", bracket), anchored off the card's ML-controls side so it
+-- tracks the same left/right setting the End/Cancel rail uses. Hidden (returns false) for a raider card
+-- or a plain win card, which carry no candidates/onAward.
+local function populateLCFlyout(frame, data)
+    local cands = data.candidates
+    if not (data.lootCouncil and data.onAward and cands and #cands > 0) then
+        frame.LCFlyout:Hide()
+        return false
+    end
+    local total = data.copiesTotal or 1
+    local remaining = data.copiesRemaining or total
+    local nextCopy = math.min(total - remaining + 1, total)
+    frame.LCFlyoutHeader:SetText(total > 1
+        and ("|cffffd200Award copy " .. nextCopy .. " of " .. total .. "|r")
+        or "|cffffd200Award to|r")
+
+    local shown = 0
+    for i, c in ipairs(cands) do
+        local row = lcFlyoutRow(frame, i)
+        local y = -20 - (i - 1) * FLYOUT_ROW_H
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", frame.LCFlyout, "TOPLEFT", 5, y)
+        row:SetPoint("TOPRIGHT", frame.LCFlyout, "TOPRIGHT", -5, y)
+        local rollText = c.roll and tostring(c.roll) or "-"
+        row.text:SetText(colorName(c.name, c.class) .. "  |cffbbbbbb" .. rollText .. "|r  |cffffd200" .. (c.bracket or "") .. "|r")
+        row.awardName = c.name
+        row:SetScript("OnClick", function() if data.onAward then data.onAward(row.awardName) end end)
+        row:Show()
+        shown = i
+    end
+    for i = shown + 1, #frame.LCRows do frame.LCRows[i]:Hide() end
+    frame.LCFlyout:SetHeight(24 + shown * FLYOUT_ROW_H)
+    frame.LCFlyout:ClearAllPoints()
+    if bannerMLSide() == "LEFT" then
+        frame.LCFlyout:SetPoint("TOPRIGHT", frame, "TOPLEFT", -6, 2)
+    else
+        frame.LCFlyout:SetPoint("TOPLEFT", frame, "TOPRIGHT", 6, 2)
+    end
+    frame.LCFlyout:Show()
+    return true
+end
+
 -- roll card second line, shared by card creation and the dedupe re-assert; an item with no
 -- listed priority shows the default bracket order, same as the roll popup did
 local function rollPrioText(prio)
@@ -916,6 +980,25 @@ local function buildBanner(bannerName, medallionCfg)
         end)
         frame.RerollButton:Hide()
 
+        -- LC award flyout (loot master only): a panel off the card's ML-controls side, populated in the
+        -- won-card configure path (populateLCFlyout) with one clickable candidate row per roller/named.
+        frame.LCFlyout = CreateFrame("Frame", nil, frame)
+        frame.LCFlyout:SetWidth(160)
+        frame.LCFlyout:SetBackdrop({
+            bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = true, tileSize = 16, edgeSize = 12,
+            insets = { left = 3, right = 3, top = 3, bottom = 3 },
+        })
+        frame.LCFlyout:SetBackdropColor(0, 0, 0, 0.9)
+        frame.LCFlyout:SetFrameLevel(frame:GetFrameLevel() + 5)
+        frame.LCFlyoutHeader = frame.LCFlyout:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        frame.LCFlyoutHeader:SetPoint("TOPLEFT", frame.LCFlyout, "TOPLEFT", 8, -7)
+        frame.LCFlyoutHeader:SetPoint("TOPRIGHT", frame.LCFlyout, "TOPRIGHT", -8, -7)
+        frame.LCFlyoutHeader:SetJustifyH("LEFT")
+        frame.LCRows = {}
+        frame.LCFlyout:Hide()
+
         tinsert(parent.LootFrames, frame)
         frame.__idx = #parent.LootFrames   -- stable id for diagnostics
 
@@ -1370,6 +1453,7 @@ local function buildBanner(bannerName, medallionCfg)
         frame.onReroll = nil
         frame.RerollButton:SetAlpha(1)
         frame.RerollButton:Hide()       -- only a no-winner won card shows it
+        frame.LCFlyout:Hide()           -- only a loot-council ML award card shows it (populated below)
         if data.rollDuration then
             -- roll-prompt row: a countdown of the roll timer + clickable bracket buttons. The live
             -- feed passes getTimeLeft (the roll's own deadline is the clock; self-correcting and
@@ -1410,7 +1494,7 @@ local function buildBanner(bannerName, medallionCfg)
         frame.rollDuration = nil
         frame.getRollers = nil
         frame.getTimeLeft = nil
-        frame.rowKey = nil
+        frame.rowKey = data.key   -- won cards keep their key so a same-key re-add (LC award progress) can update in place
         frame.isOwnerCard = nil
         frame.onPick = nil
         frame.onExpired = nil
@@ -1432,7 +1516,8 @@ local function buildBanner(bannerName, medallionCfg)
         frame.timeLeft = examine
         if frame.closeImmediate then frame.CloseButton:Show() end   -- ML: no wait
         frame.onReroll = data.onReroll
-        if data.onReroll then frame.RerollButton:Show() end   -- "no one rolled" ML card
+        if data.onReroll then frame.RerollButton:Show() end   -- "no one rolled" ML card / LC award card
+        populateLCFlyout(frame, data)                         -- LC award flyout (ML only); hides itself otherwise
         if additional then
             for _, f in ipairs(self.LootFrames) do
                 if f.alive and f ~= frame and not f.rollDuration then
@@ -1505,6 +1590,7 @@ local function buildBanner(bannerName, medallionCfg)
                         if f.MLButtons then for _, btn in ipairs(f.MLButtons) do btn:SetAlpha(1); btn:Hide() end end
                         if f.CloseButton then f.CloseButton:Hide() end
                         if f.RerollButton then f.RerollButton:Hide() end
+                        if f.LCFlyout then f.LCFlyout:Hide() end
                         removed = true
                     else
                         f:SetAlpha(f.fadeLeft / ROW_FADE_TIME)
@@ -1647,6 +1733,7 @@ local function buildBanner(bannerName, medallionCfg)
             if f.MLButtons then for _, btn in ipairs(f.MLButtons) do btn:SetAlpha(1); btn:Hide() end end
             if f.CloseButton then f.CloseButton:Hide() end
             if f.RerollButton then f.RerollButton:Hide() end
+            if f.LCFlyout then f.LCFlyout:Hide() end
             f:Hide()
         end
         banner:SetHeight(banner.baseHeight)
@@ -1743,35 +1830,6 @@ local function buildBanner(bannerName, medallionCfg)
         if not item or not item.link then return false end
         -- duration 0 means "no win toasts"; a roll prompt is not a toast and must still show
         if resultHoldSeconds() == 0 and not item.rollDuration then return false end
-        if item.key then
-            if self.seenKeys[item.key] then
-                -- Already showing. For a roll card this means a ledger restore raced the DROP: the
-                -- restore guessed the timing (local default duration) and prio, and the DROP now
-                -- carries the ML's authoritative values. The popup path fixes this by re-binding
-                -- its reused frame; the card equivalent is re-asserting timing + prio on the live
-                -- row (callbacks already resolve the current roll by id, so they need no rebind).
-                if item.rollDuration then
-                    for _, f in ipairs(self.LootFrames) do
-                        if f.alive and not f.fading and f.rowKey == item.key and f.rollDuration then
-                            f.rollDuration = item.rollDuration   -- bar denominator
-                            f.PlayerName:SetText(rollPrioText(item.prio))
-                            -- recompute bracket availability from the authoritative feed: a card first
-                            -- shown from a restore's guessed (empty) prio had BiS wrongly gated; the DROP
-                            -- carries the real prio, so re-apply the disabled map + preselected pick here
-                            applyRollButtons(f, item)
-                            -- timing needs no re-assert: getTimeLeft reads the current roll's
-                            -- deadline, which the newer feed already corrected
-                            if not f.getTimeLeft then   -- plain-decrement path: keep the bar consistent
-                                f.timeLeft = item.rollRemaining or item.rollDuration
-                                f.RollTimer:SetValue(max(f.timeLeft, 0) / item.rollDuration)
-                            end
-                        end
-                    end
-                end
-                return true   -- handled, not lost
-            end
-            self.seenKeys[item.key] = true
-        end
         local data = {
             itemLink = item.link, texture = item.icon, quantity = item.quantity or 1,
             fallbackName = item.fallbackName, -- shown when the link is a bare item:id (cold cache)
@@ -1779,6 +1837,11 @@ local function buildBanner(bannerName, medallionCfg)
             winners = item.winners, rolls = item.rolls, prompt = item.prompt, rollDuration = item.rollDuration,
             noWinner = item.noWinner,   -- won card only: nobody rolled -> "No one rolled" line + reroll
             lootCouncil = item.lootCouncil, -- won card only: LC item -> "Loot Council" line + roll breakdown
+            candidates = item.candidates,   -- LC award card (ML): flyout rows { name, class, roll, bracket }
+            onAward = item.onAward,         -- LC award card (ML): fired with the picked name -> award next copy
+            copiesTotal = item.copiesTotal, -- LC award card (ML): total copies (multi-copy header)
+            copiesRemaining = item.copiesRemaining, -- LC award card (ML): copies still to assign
+            awarded = item.awarded,         -- LC award card (ML): winners assigned so far
             onReroll = item.onReroll,   -- won card only: ML reroll callback; present = show the Reroll button
             rollRemaining = item.rollRemaining, -- static seconds-left (demo/plain data; ignored with a thunk)
             getTimeLeft = item.getTimeLeft, -- live feed: per-tick seconds left from the roll's own deadline
@@ -1794,6 +1857,48 @@ local function buildBanner(bannerName, medallionCfg)
             onMLCancel = item.onMLCancel, -- roll card only: ML control; present = show the Cancel button
             getRollers = item.getRollers, -- roll card only: thunk returning { name, class, bracket } rollers for the hover
         }
+        if item.key then
+            if self.seenKeys[item.key] then
+                -- Already showing. For a roll card this means a ledger restore raced the DROP: the
+                -- restore guessed the timing (local default duration) and prio, and the DROP now
+                -- carries the ML's authoritative values. The popup path fixes this by re-binding
+                -- its reused frame; the card equivalent is re-asserting timing + prio on the live
+                -- row (callbacks already resolve the current roll by id, so they need no rebind).
+                if data.rollDuration then
+                    for _, f in ipairs(self.LootFrames) do
+                        if f.alive and not f.fading and f.rowKey == item.key and f.rollDuration then
+                            f.rollDuration = data.rollDuration   -- bar denominator
+                            f.PlayerName:SetText(rollPrioText(data.prio))
+                            -- recompute bracket availability from the authoritative feed: a card first
+                            -- shown from a restore's guessed (empty) prio had BiS wrongly gated; the DROP
+                            -- carries the real prio, so re-apply the disabled map + preselected pick here
+                            applyRollButtons(f, data)
+                            -- timing needs no re-assert: getTimeLeft reads the current roll's
+                            -- deadline, which the newer feed already corrected
+                            if not f.getTimeLeft then   -- plain-decrement path: keep the bar consistent
+                                f.timeLeft = data.rollRemaining or data.rollDuration
+                                f.RollTimer:SetValue(max(f.timeLeft, 0) / data.rollDuration)
+                            end
+                        end
+                    end
+                else
+                    -- Won-card re-add with the same key: an LC award progressed the card (a copy was
+                    -- assigned). A repeat key never builds a new row, so reconfigure the live frame in
+                    -- place -- refresh the winner/Loot-Council line and the reroll + award flyout -- so
+                    -- awarding a copy removes the flyout and Reroll once every copy has a winner.
+                    for _, f in ipairs(self.LootFrames) do
+                        if f.alive and not f.fading and f.rowKey == item.key and not f.rollDuration then
+                            BossBanner_ConfigureLootFrame(f, data)
+                            f.onReroll = data.onReroll
+                            if data.onReroll then f.RerollButton:Show() else f.RerollButton:Hide() end
+                            populateLCFlyout(f, data)
+                        end
+                    end
+                end
+                return true   -- handled, not lost
+            end
+            self.seenKeys[item.key] = true
+        end
         if self.animState == BB_STATE_LOOT_INSERT then
             local ok = addRow(self, data)
             if not ok and item.key then self.seenKeys[item.key] = nil end   -- row cap: not showing after all

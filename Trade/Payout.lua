@@ -49,6 +49,9 @@ function addon:InitializePayout()
     if self.lootCore and not self._payoutWired then
         self._payoutWired = true
         self.lootCore:On("lotResolved", function(lot) addon:OnLotResolvedPayout(lot) end)
+        -- one copy of a loot-council lot got a manually-picked winner (AwardCopy): owe just that copy,
+        -- not the whole lot (Owe increments, so re-owing the lot would double already-owed copies).
+        self.lootCore:On("lotAwarded", function(lot, award) addon:OnLotAwardedPayout(lot, award) end)
         self.lootCore:On("lotUnlocked", function(lot, winners) addon:OnLotUnlockedPayout(lot, winners) end)
         -- core retired an owed copy (it left the bags): forgive it so payout never owes something
         -- the core no longer backs. This keeps the two ledgers in sync during a live session.
@@ -71,6 +74,15 @@ function addon:OnLotResolvedPayout(lot)
             self.payout:Owe(winner, lot.itemId, 1, link)
         end
     end
+end
+
+function addon:OnLotAwardedPayout(lot, award)
+    if not self.payout or not self:IsAuthorizedLootMaster() then return end
+    if not award or award.state ~= addon.lootCore.AWARD.OWED then return end   -- a self-win owes nothing
+    local selfKey = addon.util:NormalizeKey(addon.util:GetPlayerName("player") or "")
+    if addon.util:NormalizeKey(award.winner or "") == selfKey then return end
+    local _, link = addon.util:ItemRender(lot.itemId)
+    self.payout:Owe(award.winner, lot.itemId, 1, link)
 end
 
 function addon:OnLotUnlockedPayout(lot, winners)

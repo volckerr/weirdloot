@@ -322,6 +322,85 @@ test("LC banner: an LC item resolves to a Loot Council card, not 'no one rolled'
     eq(winMode, "lc", "WIN message carries result mode 'lc'")
 end)
 
+-- The candidate list for the LC award flyout: every roller plus any named-rule candidate present in the
+-- raid who did not roll (shown with no roll, tagged "Named").
+test("LC candidates: rollers plus named-in-raid non-rollers", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    w.addon:SetSessionLCOverride("Blade of Test", "Zara/lc")   -- names Zara, then loot council
+    local sections = { { label = "MS", members = { { name = "Alice", roll = 41 } } } }
+    local cands = w.addon:LootCouncilCandidates("Blade of Test", sections)
+    local byName = {}
+    for _, c in ipairs(cands) do byName[string.lower(c.name)] = c end
+    check(byName["alice"] and byName["alice"].roll == 41, "roller Alice present with her roll")
+    check(byName["zara"] and byName["zara"].roll == nil and byName["zara"].bracket == "Named",
+          "named non-roller Zara present, no roll, tagged Named")
+end)
+
+-- Clicking a candidate awards the next copy through the normal win machinery: the copy gets a winner,
+-- payout owes it (non-ML), and a normal-mode WIN goes to the raid.
+test("LC award: awarding a candidate owes them and broadcasts a normal WIN", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    check(w.addon:SetSessionLCOverride("Blade of Test", "lc"), "LC override set")
+    setBag(w, 40005, 1); bagUpdate(w)
+    local lot = openLot(w, 40005)
+    w.addon:StartLiveRoll(lot.id)
+    w.addon:RegisterInterest(lot.id, "Alice", "ms")
+    w.addon:ResolveLiveRoll(lot.id)
+    eq(owedCount(w), 0, "nothing owed before the ML awards")
+    local winText, winMode
+    local origSend = w.addon.SendLargeMessage
+    w.addon.SendLargeMessage = function(self, command, values, ...)
+        if command == "WIN" then winText, winMode = values[3], values[4] end
+        return origSend(self, command, values, ...)
+    end
+    w.addon:AwardLootCouncilCopy(lot.id, "Alice")
+    w.addon.SendLargeMessage = origSend
+    local award = w.addon.lootCore:Get(lot.id).awards[1]
+    eq(award.winner, "Alice", "copy 1 awarded to Alice")
+    eq(award.state, "owed", "a non-ML award is OWED")
+    eq(owedCount(w), 1, "Alice is now owed the item")
+    eq(winMode, "roll", "award broadcasts a normal-mode WIN (raid win card)")
+    check(winText and string.find(winText, "Alice"), "WIN names the winner")
+end)
+
+test("LC award: awarding the ML is a self-win (RESOLVED, nothing owed)", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    w.addon:SetSessionLCOverride("Blade of Test", "lc")
+    setBag(w, 40005, 1); bagUpdate(w)
+    local lot = openLot(w, 40005)
+    w.addon:StartLiveRoll(lot.id)
+    w.addon:RegisterInterest(lot.id, "Alice", "ms")
+    w.addon:ResolveLiveRoll(lot.id)
+    w.addon:AwardLootCouncilCopy(lot.id, "Masterlooter")
+    local award = w.addon.lootCore:Get(lot.id).awards[1]
+    eq(award.winner, "Masterlooter", "copy awarded to the ML")
+    eq(award.state, "resolved", "a self-win stays RESOLVED")
+    eq(owedCount(w), 0, "a self-win owes nothing")
+end)
+
+test("LC award: multi-copy awards one per click, then no free copy remains", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    w.addon:SetSessionLCOverride("Blade of Test", "lc")
+    setBag(w, 40005, 2); bagUpdate(w)   -- two copies
+    local lot = openLot(w, 40005)
+    w.addon:StartLiveRoll(lot.id)
+    w.addon:RegisterInterest(lot.id, "Alice", "ms")
+    w.addon:RegisterInterest(lot.id, "Bob", "ms")
+    w.addon:ResolveLiveRoll(lot.id)
+    eq(#w.addon.lootCore:Get(lot.id).awards, 2, "two award copies")
+    w.addon:AwardLootCouncilCopy(lot.id, "Alice")
+    w.addon:AwardLootCouncilCopy(lot.id, "Bob")
+    local awards = w.addon.lootCore:Get(lot.id).awards
+    eq(awards[1].winner, "Alice", "copy 1 -> Alice")
+    eq(awards[2].winner, "Bob", "copy 2 -> Bob")
+    eq(owedCount(w), 2, "both copies owed")
+    check(w.addon.lootCore:AwardCopy(lot.id, "Carl") == nil, "no free copy left to award")
+end)
+
 test("reroll: UnlockSessionRoll only affects the target lot, not other resolved lots", function()
     local w = makeWorld("Masterlooter", true)
     startSession(w)

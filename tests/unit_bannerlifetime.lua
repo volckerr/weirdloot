@@ -168,6 +168,43 @@ test("no-winner card: shows a reroll button that fires its callback and dismisse
     check(not row.alive, "the card dismissed itself after reroll")
 end)
 
+test("LC award card: candidate flyout fires the award callback, then clears on the same-key collapse", function()
+    local w = bannerWorld(true, function(opt)
+        opt.forceKeepResultPopup = true
+        opt.resultPopupAutoCloseEnabled = true
+        opt.resultPopupAutoCloseSeconds = 10
+    end)
+    local picked
+    local KEY = "L:lc1"
+    w.addon:AddLootBannerItem({
+        key = KEY, link = WON.link, icon = "x", quantity = 1, lootCouncil = true, rolls = {},
+        candidates = {
+            { name = "Flab", class = "Warrior", roll = 92, bracket = "BiS" },
+            { name = "Saelinen", class = "Rogue", roll = 41, bracket = "MS" },
+            { name = "Volcker", class = "Priest", roll = nil, bracket = "Named" },
+        },
+        copiesTotal = 1, copiesRemaining = 1,
+        onReroll = function() end,
+        onAward = function(name) picked = name end,
+    })
+    local row
+    for _ = 1, 60 do F.pump(w, 0.001); row = firstWonRow(w); if row then break end end
+    check(row, "the LC award card was shown")
+    check(row.LCFlyout:IsShown(), "the award flyout is shown while a copy is unassigned")
+    check(row.RerollButton:IsShown(), "reroll is shown on the LC card")
+    check(row.LCRows[3] and row.LCRows[3]:IsShown(), "a shown flyout row exists per candidate (incl. the named non-roller)")
+    row.LCRows[2]:GetScript("OnClick")(row.LCRows[2])
+    eq(picked, "Saelinen", "clicking the 2nd candidate row awarded to that person")
+
+    -- awarding the (only) copy collapses the card in place: same key re-added as a plain win card
+    w.addon:AddLootBannerItem({
+        key = KEY, link = WON.link, icon = "x", quantity = 1,
+        winners = { { name = "Saelinen", class = "Rogue", roll = 41, section = "LC Prio" } },
+    })
+    check(not row.LCFlyout:IsShown(), "the award flyout is hidden once the copy is awarded")
+    check(not row.RerollButton:IsShown(), "reroll is hidden once the copy is awarded")
+end)
+
 test("reused slot resets the won-card button alpha (stale-fade translucency guard)", function()
     -- A pooled slot whose previous life faded leaves its close/reroll button at a partial alpha.
     -- Every other button gets a SetAlpha(1) on reuse; these two must too, or they render translucent.
