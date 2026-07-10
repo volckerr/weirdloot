@@ -75,7 +75,7 @@
 --   Payout/TradeDeliver listen to lotResolved (Owe) / lotUnlocked (Forgive) / awardRemoved
 --     (Forgive), and report delivery back via MarkDeliveredFor -- the one back-channel into the core.
 --   UI reads List/Resolved/State/Get and refreshes on ledgerChanged.
--- Events: lotAdded, lotResolved, lotDelivered, lotUnlocked, awardRemoved, ledgerChanged.
+-- Events: lotAdded, lotResolved, lotAwarded, lotDelivered, lotUnlocked, awardRemoved, ledgerChanged.
 
 local addonName, addon = ...
 if type(addon) ~= "table" then addon = WeirdLoot or {} end
@@ -510,6 +510,30 @@ function LootCore:Unlock(id)
     self:emit("lotUnlocked", lot, priorWinners)
     self:emit("ledgerChanged")
     return true
+end
+
+-- Manually assign a winner to the next unawarded copy of a RESOLVED lot. Loot-council items resolve
+-- with awards that have no winner (the council decides later, not a roll), so the ML picks a recipient
+-- from the win card and this fills one copy, exactly as a roll winner would have: OWED when the pick is
+-- someone other than the ML, RESOLVED (self-win, ML already holds it) when it is the ML. Returns the
+-- copy index filled, or nil if the lot is not resolved or every copy already has a winner.
+function LootCore:AwardCopy(id, winner)
+    local lot = self.lots[id]; if not lot then return nil end
+    if lot.state ~= STATE.RESOLVED or not lot.awards then return nil end
+    if not winner or winner == "" then return nil end
+    for i = 1, #lot.awards do
+        local a = lot.awards[i]
+        if awardIsLive(a) and not a.winner then
+            a.winner = winner
+            a.state = self:IsML(winner) and AWARD.RESOLVED or AWARD.OWED
+            a.holder = a.holder or self._mlKey
+            self:log("award", { id = id, itemId = lot.itemId, winner = winner, awardIndex = i })
+            self:emit("lotAwarded", lot, a)
+            self:emit("ledgerChanged")
+            return i
+        end
+    end
+    return nil
 end
 
 function LootCore:UnlockAll()
