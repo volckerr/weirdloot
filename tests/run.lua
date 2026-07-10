@@ -296,6 +296,32 @@ test("reroll: Unlock-All broadcasts a CANCEL for every resolved lot", function()
     eq(w.addon.lootCore:State(b.id), "idle", "lot B idle after Unlock-All")
 end)
 
+-- An LC (loot-council) item resolves to the council, not a roll winner, so the record carries no
+-- winners. The banner must show a Loot Council card (matching the Loot Results tab), NOT the "no one
+-- rolled" / reroll card, even though people rolled.
+test("LC banner: an LC item resolves to a Loot Council card, not 'no one rolled'", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    check(w.addon:SetSessionLCOverride("Blade of Test", "lc"), "LC override set for the item")
+    setBag(w, 40005, 1); bagUpdate(w)
+    local lot = openLot(w, 40005)
+    w.addon:StartLiveRoll(lot.id)
+    w.addon:RegisterInterest(lot.id, "Masterlooter", "bis")   -- ML rolls BiS
+    w.addon:RegisterInterest(lot.id, "Alice", "ms")           -- raider (relayed) rolls MS
+    local captured, winMode
+    local origAdd, origSend = w.addon.AddLootBannerItem, w.addon.SendLargeMessage
+    w.addon.AddLootBannerItem = function(self, item) captured = item; return origAdd(self, item) end
+    w.addon.SendLargeMessage = function(self, command, values, ...)
+        if command == "WIN" then winMode = values[4] end
+        return origSend(self, command, values, ...)
+    end
+    w.addon:ResolveLiveRoll(lot.id)
+    w.addon.AddLootBannerItem, w.addon.SendLargeMessage = origAdd, origSend
+    check(captured and captured.lootCouncil, "banner item is a Loot Council card")
+    check(not (captured and captured.noWinner), "not the no-one-rolled card")
+    eq(winMode, "lc", "WIN message carries result mode 'lc'")
+end)
+
 test("reroll: UnlockSessionRoll only affects the target lot, not other resolved lots", function()
     local w = makeWorld("Masterlooter", true)
     startSession(w)
@@ -687,6 +713,18 @@ test("reroll: a raider re-rolls after unlock and the reroll resolves to a winner
     eq(ml.addon.lootCore:State(lot.id), "resolved", "reroll resolved")
     check(award.awards and award.awards[1] and award.awards[1].winner == "Raidertwo",
           "the reroll recorded Raidertwo as the winner (no more empty no-winner resolve)")
+end)
+
+test("LC banner: a raider renders a Loot Council card from a WIN with mode 'lc'", function()
+    local ml, raider, lot = rollWithRaider(40005)
+    local captured
+    local origAdd = raider.addon.AddLootBannerItem
+    raider.addon.AddLootBannerItem = function(self, item) captured = item; return origAdd(self, item) end
+    -- WIN wire: { lotId, itemId, winnersText (empty for LC), mode, "0", sectionsText }
+    raider.addon:OnWinMessage({ lot.id, tostring(40005), "", "lc", "0", "" })
+    raider.addon.AddLootBannerItem = origAdd
+    check(captured and captured.lootCouncil, "raider shows a Loot Council card for a mode-lc WIN")
+    check(not (captured and captured.noWinner), "not a no-winner card")
 end)
 
 test("live pick list: a raider sees who is rolling via RSTATE", function()

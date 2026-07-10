@@ -1749,6 +1749,10 @@ function addon:ResolveLiveRoll(rollId)
     -- -> named -> spec -> status -> roll, top-N by count) and freezes the ordered winners onto
     -- per-copy awards. lotResolved fires here -> payout owes; ledgerChanged -> projection + sync.
     local record = self.lootCore:Resolve(rollId) or {}
+    -- An LC (loot-council) item has no roll winner by design: the council picks later, so the record
+    -- carries winners = {} with isLootCouncil set. Without this branch the empty winner list reads as
+    -- "nobody rolled" even though people did roll (the Loot Results tab already shows "Loot Council").
+    local isLootCouncil = record.isLootCouncil and true or false
     local winners = record.winners
     if not winners or #winners == 0 then
         winners = (record.winner and record.winner ~= "No winner") and { record.winner } or {}
@@ -1756,14 +1760,17 @@ function addon:ResolveLiveRoll(rollId)
     local sections = self:SectionsFromResult(record)
     local winnersText = table.concat(winners, ",")
 
-    -- the wire carries itemId (not a link) and the full winners list (top-N may be > 1)
+    -- the wire carries itemId (not a link) and the full winners list (top-N may be > 1). Field 4 is the
+    -- result mode: "lc" tells raiders to render a Loot Council card (winners is empty for LC), else "roll".
     self:SendLargeMessage("WIN", {
-        rollId, tostring(roll.itemId or 0), winnersText, "roll", "0", self:EncodeSections(sections),
+        rollId, tostring(roll.itemId or 0), winnersText, isLootCouncil and "lc" or "roll", "0", self:EncodeSections(sections),
     }, "RAID", nil, "ALERT")
     self:TriggerCallback("RESULTS_UPDATED")
 
     self:CloseInterestPopup(roll)
-    if #winners > 0 then
+    if isLootCouncil then
+        self:AddLootBannerItem(self:BannerLootCouncilItem(roll, sections))
+    elseif #winners > 0 then
         self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))
     else
         -- No one rolled: the ML still gets a win card (so the drop is not silently gone) that says as
@@ -1772,7 +1779,9 @@ function addon:ResolveLiveRoll(rollId)
     end
     self.live.rolls[rollId] = nil   -- live-roll UI done; the core holds the truth
 
-    if #winners == 0 then
+    if isLootCouncil then
+        self:Print((roll.name or "item") .. " -> Loot Council.")
+    elseif #winners == 0 then
         self:Print((roll.name or "item") .. " -> no rollers.")
     else
         self:Print(string.format("%s -> %s.", roll.name or "item", winnersText))
@@ -1826,7 +1835,10 @@ end
 -- Build a loot-banner item (link/icon/winner/why/full roll list) from a resolved roll, for
 -- addon:AddLootBannerItem. This is the win display that replaces the old result popup. The winner's
 -- "why" is their own roll + bracket; rolls is every responder, class-colored on the row tooltip.
-function addon:BannerItemFromResult(roll, winners, sections)
+-- Flatten a result's sections into the banner's flat roll list ({ name, class, roll, section }), each
+-- row class-colored for the hover tooltip; a named (LC-prio) roller reads "LC Prio" instead of the
+-- bracket. Shared by the normal win card and the Loot Council card.
+local function rollsFromSections(self, sections)
     local rolls = {}
     for _, s in ipairs(sections or {}) do
         for _, m in ipairs(s.members) do
@@ -1838,6 +1850,11 @@ function addon:BannerItemFromResult(roll, winners, sections)
             }
         end
     end
+    return rolls
+end
+
+function addon:BannerItemFromResult(roll, winners, sections)
+    local rolls = rollsFromSections(self, sections)
 
     -- One winner entry per awarded copy, each enriched with their roll + bracket from the breakdown so a
     -- multi-copy drop shows every winner. winner/winnerClass/why mirror the first for single-winner use.
@@ -1889,6 +1906,21 @@ function addon:BannerNoWinnerItem(roll)
         onReroll = function()
             if self:UnlockSessionRoll(lotId) then self:StartLiveRoll(lotId) end
         end,
+    }
+end
+
+-- A loot-council win card: an LC item resolves to the council rather than a roll winner, so the card
+-- reads "Loot Council" and shows the full roller breakdown, instead of the misleading "no one rolled"
+-- card. No reroll button: the item was not left unrolled, it went to the council. The per-candidate
+-- award action the ML clicks to pick the recipient is TODO item 38 (the award dialog).
+function addon:BannerLootCouncilItem(roll, sections)
+    return {
+        key = roll.id,
+        link = roll.link,
+        icon = roll.icon,
+        quantity = roll.quantity,
+        lootCouncil = true,
+        rolls = rollsFromSections(self, sections),
     }
 end
 
@@ -2008,8 +2040,8 @@ function addon:OnRspMessage(sender, fields)
 end
 
 function addon:OnWinMessage(fields)
-    -- wire: { lotId, itemId, winnersText, "roll", "0", sectionsText }
-    local rollId, itemId, winnersText, sectionsText = fields[1], tonumber(fields[2]), fields[3], fields[6]
+    -- wire: { lotId, itemId, winnersText, mode ("roll"|"lc"), "0", sectionsText }
+    local rollId, itemId, winnersText, mode, sectionsText = fields[1], tonumber(fields[2]), fields[3], fields[4], fields[6]
     local roll = self.live.rolls[rollId]
     self:LogCoreEvent("recv-win", { id = rollId, item = itemId, hasPopup = (roll and roll.popup) ~= nil })
     if not roll then
@@ -2033,8 +2065,12 @@ function addon:OnWinMessage(fields)
     -- hide-unusable) -- evaluated live so a filtered item is caught even if no roll surface opened.
     -- Off by default; the ML always sees results (its own resolve path is ungated).
     local suppressed = getOptions().hideUnrolledWins and (roll.passed or self:ShouldSuppressRollPopup(roll))
-    if #winners > 0 and not suppressed then
+    if not suppressed then
         local sections = self:DecodeSections(sectionsText)
-        self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))
+        if mode == "lc" then
+            self:AddLootBannerItem(self:BannerLootCouncilItem(roll, sections))
+        elseif #winners > 0 then
+            self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))
+        end
     end
 end

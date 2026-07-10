@@ -385,6 +385,8 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
         nameText = rollPrioText(data.prio)
     elseif data.noWinner then
         nameText = "|cffaaaaaaNo one rolled|r"   -- ML-only card: the reroll button sits opposite
+    elseif data.lootCouncil then
+        nameText = "|cffffd200Loot Council|r"    -- LC item: council decides, no roll winner
     elseif data.prompt then
         nameText = data.prompt
     else
@@ -1776,6 +1778,7 @@ local function buildBanner(bannerName, medallionCfg)
             winner = item.winner, winnerClass = item.winnerClass, why = item.why,
             winners = item.winners, rolls = item.rolls, prompt = item.prompt, rollDuration = item.rollDuration,
             noWinner = item.noWinner,   -- won card only: nobody rolled -> "No one rolled" line + reroll
+            lootCouncil = item.lootCouncil, -- won card only: LC item -> "Loot Council" line + roll breakdown
             onReroll = item.onReroll,   -- won card only: ML reroll callback; present = show the Reroll button
             rollRemaining = item.rollRemaining, -- static seconds-left (demo/plain data; ignored with a thunk)
             getTimeLeft = item.getTimeLeft, -- live feed: per-tick seconds left from the roll's own deadline
