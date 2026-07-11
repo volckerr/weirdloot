@@ -232,6 +232,100 @@ test("reused slot resets the won-card button alpha (stale-fade translucency guar
     check(reused.RerollButton.__alpha == 1, "the reroll button alpha was reset to 1 on reuse")
 end)
 
+test("ML's phantom cards show the 'On Corpse' side tag; normal cards never do", function()
+    -- A phantom's copy never leaves the boss, so the ML's cards must say so on the card itself
+    -- (a chat alert scrolls away; the ML must not walk off thinking every drop is in their bags).
+    -- The signal is the OnCorpseTag fontstring beside the card, not text inside the lines.
+    local w = bannerWorld(true)
+    local drops = w.env.WeirdLootDropsBanner
+
+    -- ML roll card for a phantom: side tag shown, prio line untouched
+    w.addon:AddRollBannerItem({
+        key = "L:90", link = WON.link, icon = "x", quantity = 1,
+        rollDuration = 30, prio = "MS > OS", onCorpse = true, isOwner = true,
+        onMLEnd = function() end,   -- ML rail present, as on the real owner card
+    })
+    local rollRow
+    for _ = 1, 60 do
+        F.pump(w, 0.001)
+        for _, f in ipairs(drops.LootFrames) do if f.alive and f.rollDuration then rollRow = f end end
+        if rollRow then break end
+    end
+    check(rollRow ~= nil, "roll card landed")
+    check(rollRow.OnCorpseTag:IsShown(), "roll card shows the On Corpse side tag")
+    check((rollRow.OnCorpseTag.__text or ""):find("On Corpse", 1, true) ~= nil, "tag says On Corpse")
+    check((rollRow.PlayerName.__text or ""):find("MS > OS", 1, true) ~= nil, "prio line present")
+    check((rollRow.PlayerName.__text or ""):find("corpse", 1, true) == nil, "prio line carries no inline tag")
+
+    -- a normal roll card carries no tag
+    w.addon:AddRollBannerItem({
+        key = "L:91", link = WON.link, icon = "x", quantity = 1,
+        rollDuration = 30, prio = "MS > OS", isOwner = true, onMLEnd = function() end,
+    })
+    local plainRow
+    for _ = 1, 60 do
+        F.pump(w, 0.001)
+        for _, f in ipairs(drops.LootFrames) do
+            if f.alive and f.rollDuration and f ~= rollRow then plainRow = f end
+        end
+        if plainRow then break end
+    end
+    check(plainRow ~= nil, "plain roll card landed")
+    check(not plainRow.OnCorpseTag:IsShown(), "no side tag on a normal roll")
+
+    -- ML win card for a resolved phantom (corpseSend): side tag shown
+    w.addon:AddLootBannerItem({
+        key = "L:90", link = WON.link, icon = "x", quantity = 1,
+        winners = WON.winners, corpseSend = true,
+        candidates = { { name = "Alice", class = "Mage", roll = 50, bracket = "MS" } },
+        onAward = function() end,
+    })
+    pumpN(w, 0.01, 5)
+    local winRow = firstWonRow(w)
+    check(winRow ~= nil, "win card landed")
+    check(winRow.OnCorpseTag:IsShown(), "win card shows the On Corpse side tag")
+
+    -- delivered: the same-key re-add without corpseSend clears the tag
+    w.addon:AddLootBannerItem({
+        key = "L:90", link = WON.link, icon = "x", quantity = 1, winners = WON.winners,
+    })
+    pumpN(w, 0.01, 5)
+    check(not winRow.OnCorpseTag:IsShown(), "tag clears once the copy is delivered")
+end)
+
+test("'Items still on corpse' header: one strip above the drops banner while any phantom is outstanding", function()
+    -- ML must use the authority name the roster mock resolves (bannerWorld's names are not the ML)
+    local w = F.makeWorld("Masterlooter", true)
+    F.loadBanner(w)
+    w.addon.db.options.bannerInstant = true
+    F.startSession(w)
+    local core = w.addon.lootCore
+    local strip = w.env.WeirdLootOnCorpseBanner
+
+    w.addon:RefreshRollsLeftBanner()
+    check(not strip:IsShown(), "hidden with nothing outstanding")
+
+    local lotA = core:MintPhantom(60606, 1)
+    core:MintPhantom(60607, 1)                    -- two outstanding items -> still ONE strip
+    w.addon:RefreshRollsLeftBanner()
+    check(strip:IsShown(), "shown while phantoms are unresolved")
+    check((strip.text.__text or ""):find("re%-loot once rolls complete") ~= nil, "carries the instruction text")
+
+    w.addon:StartLiveRoll(lotA.id)
+    w.addon:RegisterInterest(lotA.id, "Gorgarg", "ms")
+    w.addon:ResolveLiveRoll(lotA.id)
+    w.addon:RefreshRollsLeftBanner()
+    check(strip:IsShown(), "still shown while a send is pending (and a second phantom rolls)")
+
+    -- deliver A's copy and resolve B away entirely
+    w.addon.phantomSends[lotA.id] = nil
+    local lotB = core:openPhantomLotForItem(60607)
+    w.addon:StartLiveRoll(lotB.id)
+    w.addon:ResolveLiveRoll(lotB.id)              -- no rollers: resolved, nothing pending
+    w.addon:RefreshRollsLeftBanner()
+    check(not strip:IsShown(), "hidden once nothing is outstanding")
+end)
+
 test("drops banner (roll cards) sits a clear band above the awarded banner (win cards)", function()
     -- The two banners overlap in one region (awarded pulled up into the drops footer). Regression
     -- for the cross-banner layering bug where a win card's bg tint covered a roll card's countdown

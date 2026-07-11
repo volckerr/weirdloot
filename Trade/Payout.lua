@@ -66,6 +66,9 @@ end
 
 function addon:OnLotResolvedPayout(lot)
     if not self.payout or not self:IsAuthorizedLootMaster() then return end
+    -- a phantom copy is on the corpse, not in the ML's bags: it is master-looted to the winner
+    -- (LootObserver), never trade-delivered, so payout owes nothing and sends no come-trade whisper
+    if lot.phantom then return end
     local selfKey = addon.util:NormalizeKey(addon.util:GetPlayerName("player") or "")
     local _, link = addon.util:ItemRender(lot.itemId)
     for _, award in ipairs(lot.awards or {}) do
@@ -78,6 +81,7 @@ end
 
 function addon:OnLotAwardedPayout(lot, award)
     if not self.payout or not self:IsAuthorizedLootMaster() then return end
+    if lot.phantom then return end   -- corpse copy: delivered by master loot, not by trade
     if not award or award.state ~= addon.lootCore.AWARD.OWED then return end   -- a self-win owes nothing
     local selfKey = addon.util:NormalizeKey(addon.util:GetPlayerName("player") or "")
     if addon.util:NormalizeKey(award.winner or "") == selfKey then return end

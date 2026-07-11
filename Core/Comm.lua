@@ -281,6 +281,7 @@ function addon:BuildLotValue(lot)
         winners = winners,
         awards = awards,
         removed = lot.removed or nil,
+        phantom = lot.phantom or nil,               -- corpse copy: mirrors must not treat it owed-tradeable
         seq = self.lootCore.seq or 0,               -- used by deltas; ignored in a full snapshot
         rollRemaining = tonumber(self:RollRemaining(lot)),   -- number for a rolling lot, else nil
     }
@@ -300,6 +301,7 @@ function addon:DecodeLotValue(v)
         count = v.count or 0,
         responses = v.responses or {},
         removed = v.removed or nil,
+        phantom = v.phantom or nil,
     }
     -- Rebuild the authoritative award disposition so a mirror's liveCount is holder-aware (a copy held
     -- by another ML is not in OUR bags) and a promoted ML inherits the owed map directly.

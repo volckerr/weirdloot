@@ -204,10 +204,10 @@ local function updateLootMasterControlButtons(row, isVisible, activeRoll, isLock
     end
 end
 
-local function applyLootChoiceAvailability(row, isLocked, isAllowed, itemLink, itemName)
+local function applyLootChoiceAvailability(row, isLocked, isAllowed, itemLink, itemName, isPhantom)
     -- Same policy as the roll popup (util:RollTierAvailability), rendered as plain enable/disable.
     local itemId = itemLink and util:ItemIdFromLink(itemLink)
-    local blockReason = itemId and addon:RollSelfBlockReason(itemId)
+    local blockReason = itemId and addon:RollSelfBlockReason(itemId, isPhantom)
     local hasPrio = addon:ItemHasPriority(itemName)
     local avail = util:RollTierAvailability(itemLink, isAllowed, isLocked, blockReason, hasPrio)
     for _, option in ipairs(RESPONSE_BUTTONS) do
@@ -354,7 +354,9 @@ function addon:BuildLootTab()
                     addon:Print("Your class cannot use that token. You may only pass.")
                     return
                 end
-                local blockReason = option.key ~= "pass" and addon:RollSelfBlockReason(row.item.id)
+                -- row.item.itemId, not row.item.id: the row id is the LOT id ("L:n"), and the
+                -- hold/quest checks match on the numeric item id
+                local blockReason = option.key ~= "pass" and addon:RollSelfBlockReason(row.item.itemId, row.item.phantom)
                 if blockReason == "quest" then
                     addon:Print("You have already completed that quest. You may only pass.")
                     return
@@ -679,7 +681,7 @@ function addon:RefreshLootTab()
         local locked = self:IsItemLocked(item.id)
         local allowedForPlayer = isPlayerAllowedForLootItem(item, playerName)
         row.icon:SetDesaturated(locked)        -- grey out the item icon once it's been rolled out
-        applyLootChoiceAvailability(row, locked, allowedForPlayer, item.link, rName or item.name)
+        applyLootChoiceAvailability(row, locked, allowedForPlayer, item.link, rName or item.name, item.phantom)
         updateLootMasterControlButtons(row, self:IsAuthorizedLootMaster(), self:GetActiveLiveRollForItem(item), locked)
         local typeText, slotText = getLootItemColumns(item.link)
         row.itemType:SetText(typeText)

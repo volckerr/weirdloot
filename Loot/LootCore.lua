@@ -235,39 +235,68 @@ function LootCore:lotsForItem(itemId)
     return out
 end
 
+-- Open lot for BAG-BACKED copies only: bag growth must merge into a bag-backed lot, never into a
+-- phantom (a phantom's copies are on a corpse, not in anyone's bags; see MintPhantom).
 function LootCore:openLotForItem(itemId)
     for i = 1, #self.order do
         local lot = self.lots[self.order[i]]
-        if lot and lot.itemId == itemId and isOpen(lot) then return lot end
+        if lot and lot.itemId == itemId and isOpen(lot) and not lot.phantom then return lot end
+    end
+    return nil
+end
+
+function LootCore:openPhantomLotForItem(itemId)
+    for i = 1, #self.order do
+        local lot = self.lots[self.order[i]]
+        if lot and lot.itemId == itemId and isOpen(lot) and lot.phantom then return lot end
     end
     return nil
 end
 
 -- Reconcile compares this against the CURRENT ML's bag scan, so it counts only copies this ML holds
 -- (holder-aware): an inherited copy held by a previous ML is not in our bags and must not mask a drop.
+-- Phantom lots never count: their copies are on a corpse, so bag truth can neither confirm nor retire
+-- them, and a phantom must not mask a real bag copy of the same item from minting its own lot.
 function LootCore:liveCountForItem(itemId)
     local total = 0
     local lots = self:lotsForItem(itemId)
-    for i = 1, #lots do total = total + liveCount(lots[i], self._mlKey) end
+    for i = 1, #lots do
+        if not lots[i].phantom then total = total + liveCount(lots[i], self._mlKey) end
+    end
     return total
 end
 
-function LootCore:mint(itemId, count, fresh)
+function LootCore:mint(itemId, count, fresh, phantom)
     self.seq = self.seq + 1
     local lot = {
         id = "L:" .. self.seq,
         itemId = itemId, -- the ONLY identity; name/link rendered on demand from this
         state = fresh and STATE.NEW or STATE.IDLE,
         count = count,
+        phantom = phantom or nil,
         responses = {},
         awards = nil,
         record = nil,
     }
     self.lots[lot.id] = lot
     self.order[#self.order + 1] = lot.id
-    self:log("mint", { id = lot.id, itemId = itemId, count = count, fresh = fresh and true or false, state = lot.state })
+    self:log("mint", { id = lot.id, itemId = itemId, count = count, fresh = fresh and true or false, state = lot.state, phantom = phantom or nil })
     self:emit("lotAdded", lot)
     return lot
+end
+
+-- A PHANTOM lot rolls an item the ML can never hold: the copy is visible on a corpse but cannot
+-- enter the ML's bags (a pure-Unique the ML already holds) or is invisible to the ML entirely
+-- (a quest-gated drop). The lot rides the normal surface/roll/resolve machinery, but it is
+-- excluded from ALL bag-truth accounting (liveCountForItem / openLotForItem / retire / drain):
+-- bag reality can neither mint, grow, nor retire it. Delivery is likewise never a trade: the
+-- copy goes corpse-to-winner via master loot, recorded through MarkDelivered by the loot
+-- observer. Always fresh (state NEW) so it surfaces/auto-rolls like a real drop. One open
+-- phantom per itemId: re-detections (the ML re-opening the same corpse) return the open lot.
+function LootCore:MintPhantom(itemId, count)
+    local existing = self:openPhantomLotForItem(itemId)
+    if existing then return existing end
+    return self:mint(itemId, count or 1, true, true)
 end
 
 -- ---------------------------------------------------------------------------
@@ -289,10 +318,11 @@ function LootCore:Reconcile(eligible, freshLinks, protectOwed)
     end
 
     -- items present in the ledger but no longer eligible at all -> drain to zero
+    -- (phantom lots are not bag-backed, so "absent from bags" never drains them)
     local seen = {}
     for i = 1, #self.order do
         local lot = self.lots[self.order[i]]
-        if lot and lotLive(lot) and not seen[lot.itemId] then
+        if lot and not lot.phantom and lotLive(lot) and not seen[lot.itemId] then
             seen[lot.itemId] = true
             if eligible[lot.itemId] == nil then
                 if self:reconcileItem(lot.itemId, 0, false, protectOwed) then changed = true end
@@ -350,7 +380,8 @@ function LootCore:retireFromItem(itemId, n, protectOwed)
         local live = {}
         local lots = self:lotsForItem(itemId)
         for _, lot in ipairs(lots) do
-            if lot.awards then
+            -- a phantom award is never in the bags, so a bag decrease can never be its removal
+            if lot.awards and not lot.phantom then
                 for _, a in ipairs(lot.awards) do
                     -- protectOwed: while a trade is open, an owed copy leaving bags is the trade
                     -- itself; leave it owed so the trade-complete callback can mark it delivered.
@@ -474,7 +505,8 @@ function LootCore:Resolve(id)
         -- holder = the player physically custodying this copy, recorded by name (the resolving ML), so
         -- the disposition survives a loot-master handoff: "self-win" stops meaning "whoever is ML now"
         -- and becomes "this named player has it". owed = won by someone other than the holder.
-        local award = { winner = w or nil, holder = self._mlKey }
+        -- A phantom copy has NO holder: it sits on the corpse until master-looted to the winner.
+        local award = { winner = w or nil, holder = (not lot.phantom) and self._mlKey or nil }
         if w and not self:IsML(w) then
             award.state = AWARD.OWED
         else
@@ -526,7 +558,7 @@ function LootCore:AwardCopy(id, winner)
         if awardIsLive(a) and not a.winner then
             a.winner = winner
             a.state = self:IsML(winner) and AWARD.RESOLVED or AWARD.OWED
-            a.holder = a.holder or self._mlKey
+            a.holder = a.holder or ((not lot.phantom) and self._mlKey or nil)
             self:log("award", { id = id, itemId = lot.itemId, winner = winner, awardIndex = i })
             self:emit("lotAwarded", lot, a)
             self:emit("ledgerChanged")
@@ -558,11 +590,13 @@ function LootCore:MarkDelivered(id, awardIndex, recipient, when)
 end
 
 -- The path TradeDeliver uses: a trade to `player` for `itemId` completed. Marks the oldest
--- matching owed award delivered (FIFO over that player's owed copies of the item).
+-- matching owed award delivered (FIFO over that player's owed copies of the item). Phantom
+-- awards are skipped: their copies are never in the ML's bags, so no trade can deliver them
+-- (a trade of a REAL copy of the same item must not consume the phantom's owe).
 function LootCore:MarkDeliveredFor(player, itemId, when)
     for i = 1, #self.order do
         local lot = self.lots[self.order[i]]
-        if lot and lot.awards and (itemId == nil or lot.itemId == itemId) then
+        if lot and lot.awards and not lot.phantom and (itemId == nil or lot.itemId == itemId) then
             for idx = 1, #lot.awards do
                 local a = lot.awards[idx]
                 if a.state == AWARD.OWED and a.winner == player then
@@ -584,12 +618,14 @@ function LootCore:LiveCount(id) local l = self.lots[id]; return l and liveCount(
 
 -- How many copies this player has WON but not yet received (state OWED). Drives the "you are owed
 -- loot" minimap indicator; works on a raider's mirrored ledger since per-copy winner/state ride the wire.
+-- Phantom awards are excluded: that copy is master-looted to the winner off the corpse, so there is
+-- nothing to come trade the ML for and the owed indicator would misdirect them.
 function LootCore:OwedCountFor(player)
     if not player then return 0 end
     local n = 0
     for i = 1, #self.order do
         local lot = self.lots[self.order[i]]
-        if lot and lot.awards then
+        if lot and lot.awards and not lot.phantom then
             for idx = 1, #lot.awards do
                 local a = lot.awards[idx]
                 if a.state == AWARD.OWED and a.winner == player then
@@ -603,12 +639,13 @@ end
 
 -- The distinct items this player is owed, aggregated as { {itemId=, count=}, ... } in lot order.
 -- Used to list owed loot in the minimap tooltip; the link/name is rendered locally from itemId.
+-- Phantom awards excluded, same as OwedCountFor.
 function LootCore:OwedItemsFor(player)
     if not player then return {} end
     local out, index = {}, {}
     for i = 1, #self.order do
         local lot = self.lots[self.order[i]]
-        if lot and lot.awards then
+        if lot and lot.awards and not lot.phantom then
             for idx = 1, #lot.awards do
                 local a = lot.awards[idx]
                 if a.state == AWARD.OWED and a.winner == player then

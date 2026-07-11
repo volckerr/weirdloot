@@ -222,6 +222,7 @@ function addon:RebuildLootProjections()
             icon = icon,
             quantity = core:LiveCount(lot.id),
             state = lot.state,
+            phantom = lot.phantom or nil,       -- copy on a corpse, not in the ML's bags
             responses = lot.responses,          -- playerKey -> tier string
             locked = lot.state == core.STATE.RESOLVED,
         }

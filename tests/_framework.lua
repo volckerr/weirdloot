@@ -149,6 +149,11 @@ function self.makeWorld(playerName, isML)
                 -- record the last set alpha (on __alpha) so reuse/reset tests can assert it, while
                 -- GetAlpha above still returns 1 for layout math.
                 return function(s, a) s.__alpha = a; return s end
+            elseif k == "SetText" then
+                -- record fontstring text (on __text) so card-line tests can assert what a row says
+                return function(s, t) s.__text = t; return s end
+            elseif k == "GetText" then
+                return function(s) return s.__text end
             elseif k == "Show" then
                 return function(s) s.__shown = true; return s end
             elseif k == "Hide" then
@@ -167,6 +172,11 @@ function self.makeWorld(playerName, isML)
                 return function(s) s.__disabled = true; return s end
             elseif k == "IsEnabled" then
                 return function(s) return not s.__disabled end
+            elseif k == "CreateFontString" or k == "CreateTexture" then
+                -- children must be DISTINCT objects: a fontstring records its own __text (SetText
+                -- above); the chainable-self fallback would make every sibling share one __text,
+                -- letting any SetText("") clobber the line a test wants to read
+                return function() return newFrame() end
             end
             -- WoW frame methods are CamelCase; the addon's data fields are lowercase. Return a
             -- chainable no-op for methods, but nil for an UNSET data field (e.g. frame.elapsed),
@@ -508,6 +518,7 @@ self.ADDON_FILES = {
     "Data/BlacklistPresets/Paladin.lua", "Data/BlacklistPresets/Warlock.lua",
     "Data/ItemInfo.lua", "Data/LootPrios.lua",
     "Loot/LootCore.lua", "Loot/Resolver.lua", "Loot/Session.lua", "Loot/LiveRoll.lua", "Loot/AutoLoot.lua",
+    "Loot/LootObserver.lua",
     "Trade/TradeDeliver.lua", "Trade/Payout.lua",
     "UI/Popups.lua",
 }

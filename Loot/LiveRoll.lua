@@ -294,7 +294,7 @@ function addon:RestoreRollPopup(lot)
         id = lot.id, itemId = lot.itemId, link = link,
         name = name or link or ("item:" .. tostring(lot.itemId)),
         icon = icon, prio = prio, owner = false, registrants = {}, resolved = false,
-        quantity = lot.count or 1,
+        quantity = lot.count or 1, phantom = lot.phantom or nil,
         duration = getRollDuration(),
         deadline = GetTime() + remaining,
     }
@@ -653,7 +653,7 @@ for tier, label in pairs(CARD_BRACKETS) do CARD_TIERS[label] = tier end
 local function applyInterestButtonAvailability(self, f, roll)
     local playerName = util:GetPlayerName("player")
     local allowed = isPlayerAllowedForRoll(self, roll, playerName)
-    local blockReason = self:RollSelfBlockReason(roll.itemId)
+    local blockReason = self:RollSelfBlockReason(roll.itemId, roll.phantom)
     -- ML authority: BiS availability follows the prio the ML broadcast (roll.prio), not this client's
     -- own list, so a raider with a different or stale prio table can't enable a BiS the ML did not
     -- grant. A no-prio item syncs as DEFAULT_PRIO; any other string means it has a listed priority.
@@ -1120,8 +1120,11 @@ end
 -- The ML is exempt: they always transiently hold the dropped copy during rolls (it sits in their bags
 -- until handed out), so the hold-check would trip on the very item being rolled -- a false positive.
 -- Other players only ever hold a copy that is genuinely theirs.
-function addon:OwnsBlockingUnique(itemId)
-    if self:IsAuthorizedLootMaster() then return false end
+-- EXCEPT on a phantom lot (forPhantom): its copy never enters the ML's bags -- the lot exists
+-- precisely because the ML already holds a blocking copy -- so the ML's held copy is a genuine
+-- block, not the transient drop, and the exemption must not apply.
+function addon:OwnsBlockingUnique(itemId, forPhantom)
+    if not forPhantom and self:IsAuthorizedLootMaster() then return false end
     return self:PlayerHoldsItem(itemId) and self:IsItemPureUnique(itemId)
 end
 
@@ -1143,10 +1146,11 @@ end
 
 -- Combined self-block reason for rolling on itemId, or nil if you may roll. "quest" (you already did
 -- the quest this drop starts) takes priority over "unique" (you already hold this pure-Unique item).
-function addon:RollSelfBlockReason(itemId)
+-- forPhantom: the roll is a phantom lot (copy on the corpse), which drops the ML's unique exemption.
+function addon:RollSelfBlockReason(itemId, forPhantom)
     if not itemId then return nil end
     if self:OwnsQuestReward(itemId) then return "quest" end
-    if self:OwnsBlockingUnique(itemId) then return "unique" end
+    if self:OwnsBlockingUnique(itemId, forPhantom) then return "unique" end
     -- Class equip-eligibility. IsItemUsableForPlayer matches GetItemInfo's localized subtype against
     -- English tables, i.e. it assumes an enUS client (ChromieCraft is enUS); item 31 tracks making the
     -- match locale-independent. Uncached items resolve as usable, so a still-loading item is never blocked.
@@ -1266,7 +1270,7 @@ function addon:ShowRollBannerCard(roll)
 
     local playerName = util:GetPlayerName("player")
     local allowed = isPlayerAllowedForRoll(self, roll, playerName)
-    local blockReason = self:RollSelfBlockReason(roll.itemId)
+    local blockReason = self:RollSelfBlockReason(roll.itemId, roll.phantom)
     -- same ML-authority rule as the popup: BiS follows the prio the ML broadcast, not local lists
     local hasPrio = roll.prio ~= nil and roll.prio ~= "" and roll.prio ~= DEFAULT_PRIO
     local avail = util:RollTierAvailability(roll.itemId, allowed, false, blockReason, hasPrio)
@@ -1297,6 +1301,9 @@ function addon:ShowRollBannerCard(roll)
         icon = icon or "Interface\\Icons\\INV_Misc_QuestionMark",
         quantity = roll.quantity or 1,
         prio = (roll.prio and roll.prio ~= "") and roll.prio or nil,
+        -- ML only: a phantom's copy is still ON THE CORPSE while it rolls; tag the card so the ML
+        -- doesn't walk off believing every drop made it into their bags. Raiders roll it normally.
+        onCorpse = (roll.phantom and roll.owner) and true or nil,
         rollDuration = roll.duration or ROLL_DURATION,
         -- the card owns no clock: it asks per tick, and the answer tracks the CURRENT roll's
         -- deadline, so a restore-guessed deadline self-corrects the moment the DROP lands
@@ -1687,7 +1694,7 @@ function addon:StartLiveRoll(lotId)
     local roll = {
         id = lotId, itemId = lot.itemId, link = link, name = name,
         icon = icon, prio = prio, owner = true, registrants = {}, resolved = false,
-        duration = rollDuration, quantity = quantity,
+        duration = rollDuration, quantity = quantity, phantom = lot.phantom or nil,
         deadline = GetTime() + rollDuration,   -- authoritative end; sync carries the remaining
     }
     self.live.rolls[lotId] = roll
@@ -1768,8 +1775,18 @@ function addon:ResolveLiveRoll(rollId)
     self:TriggerCallback("RESULTS_UPDATED")
 
     self:CloseInterestPopup(roll)
+    local lot = self.lootCore:Get(rollId)
     if isLootCouncil then
         self:ShowLootCouncilCard(rollId)   -- ML card with the award flyout; raiders got the "lc" WIN above
+    elseif lot and lot.phantom and #winners > 0 then
+        -- Phantom win: the copy is on the corpse, not in our bags. Register the pending send (the
+        -- observer assigns it the moment the loot window shows the item) and show the send card
+        -- instead of a plain win card. Raiders got the normal WIN above and render a standard card.
+        self.phantomSends = self.phantomSends or {}
+        self.phantomSends[rollId] = { itemId = lot.itemId, target = winners[1] }
+        self:ShowPhantomSendCard(rollId)
+        if self.lootObs and self.lootObs.open then self:TryPhantomSends() end
+        self:Print("Re-open the corpse to send " .. (roll.name or "the item") .. " to " .. winners[1] .. ".")
     elseif #winners > 0 then
         self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))
     else
@@ -2032,6 +2049,37 @@ function addon:AwardLootCouncilCopy(lotId, winner)
     }, "RAID", nil, "ALERT")
     self:TriggerCallback("RESULTS_UPDATED")
     self:ShowLootCouncilCard(lotId)
+end
+
+-- Show/refresh the ML's win card for a resolved PHANTOM lot: the copy is on the corpse, so instead
+-- of a plain win card it carries the send state ("on corpse" tag) and the LC-style candidate flyout
+-- to retarget the send (default target = the roll winner; a click retargets and, with the loot
+-- window open, assigns immediately). Collapses to a plain win card once the copy is delivered.
+-- ML only; raiders render the standard win card from the WIN broadcast.
+function addon:ShowPhantomSendCard(lotId)
+    local core = self.lootCore
+    local lot = core:Get(lotId); if not lot then return end
+    local name, link, icon = util:ItemRender(lot.itemId)
+    local sections = self:SectionsFromResult(lot.record or {})
+    local send = self.phantomSends and self.phantomSends[lotId]
+
+    local winners = {}
+    for _, a in ipairs(lot.awards or {}) do
+        if a.winner then winners[#winners + 1] = send and send.target or a.winner end
+    end
+    local pseudo = { id = lotId, link = link, icon = icon, quantity = #(lot.awards or {}), name = name }
+    local item = self:BannerItemFromResult(pseudo, winners, sections)
+
+    if send then
+        item.corpseSend = true
+        item.candidates = self:LootCouncilCandidates(name, sections)
+        item.onAward = function(who) self:SetPhantomSendTarget(lotId, who) end
+        item.onReroll = function()
+            self.phantomSends[lotId] = nil
+            if self:UnlockSessionRoll(lotId) then self:StartLiveRoll(lotId) end
+        end
+    end
+    self:AddLootBannerItem(item)
 end
 
 -- pack sections for WIN: "label~name=roll,name=roll" joined by ";"
