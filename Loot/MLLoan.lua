@@ -146,20 +146,49 @@ end
 
 -- Owner: the borrower reports the loaned item landed in their bags. Verify it is really them,
 -- record the phantom award delivered (receiver = borrower), and wrap the loan up.
+--
+-- A LOANDONE can legitimately arrive when it no longer matches the active loan: the borrower's
+-- pickup racing a cancel/timeout (the loan cleared while the whisper was in flight), or a later
+-- loan already running. The pending-loan registry (phantomLoans: minted at award time, cleared
+-- only by a recorded delivery) still knows the lot, so settle off it instead of dropping the
+-- whisper and stranding the award as owed forever. The registry path skips the authority gate
+-- deliberately: after a cancel the 60s transit escape hatch may have handed the roster answer
+-- back to the borrower, but the delivery record is local ML bookkeeping (disposition is never
+-- wire-carried), and the registry only exists on the client that awarded the lot.
 function addon:OnLoanDoneMessage(sender, fields)
+    local itemId = tonumber(fields and fields[1])
+    local senderKey = util:NormalizeKey(sender or "")
     local loan = self:ActiveMLLoan()
-    if not loan or not self:IsAuthorizedLootMaster() then return end
-    if util:NormalizeKey(sender or "") ~= util:NormalizeKey(loan.borrower) then return end
 
-    local lotId = loan.lotId
-    if lotId then
-        self:MarkPhantomAwardDelivered(lotId, loan.borrower)
-        if self.phantomLoans then self.phantomLoans[lotId] = nil end
-        local lot = self.lootCore and self.lootCore:Get(lotId)
-        local _, link = lot and util:ItemRender(lot.itemId)
-        self:Print((link or "The item") .. " picked up by " .. loan.borrower .. "; loan fulfilled.")
+    if loan and senderKey == util:NormalizeKey(loan.borrower)
+        and (not itemId or itemId == loan.itemId) then
+        if not self:IsAuthorizedLootMaster() then return end
+        local lotId = loan.lotId
+        if lotId then
+            self:MarkPhantomAwardDelivered(lotId, loan.borrower)
+            if self.phantomLoans then self.phantomLoans[lotId] = nil end
+            local lot = self.lootCore and self.lootCore:Get(lotId)
+            local _, link = lot and util:ItemRender(lot.itemId)
+            self:Print((link or "The item") .. " picked up by " .. loan.borrower .. "; loan fulfilled.")
+        end
+        self:EndMLLoan("delivered")
+        return
     end
-    self:EndMLLoan("delivered")
+
+    -- No/other loan active: a registered pending loan whose target is the sender and whose item
+    -- matches is the same proof of identity the live path uses. Settle that lot; never touch a
+    -- different loan that may be running.
+    for lotId, pending in pairs(self.phantomLoans or {}) do
+        if pending.itemId == itemId and util:NormalizeKey(pending.target or "") == senderKey then
+            self:MarkPhantomAwardDelivered(lotId, pending.target)
+            self.phantomLoans[lotId] = nil
+            local _, link = util:ItemRender(itemId)
+            self:Print((link or "The item") .. " picked up by " .. pending.target .. "; owed copy settled (the loan had already ended).")
+            if self.ShowPhantomLoanCard then self:ShowPhantomLoanCard(lotId) end
+            if self.RefreshRollsLeftBanner then self:RefreshRollsLeftBanner() end
+            return
+        end
+    end
 end
 
 -- ---------------------------------------------------------------------------

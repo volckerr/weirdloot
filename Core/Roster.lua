@@ -347,6 +347,28 @@ function addon:RefreshLootAuthority()
     -- ML loan popups for the raid leader (no-op for everyone else; transition-tracked inside)
     if self.MaybePromptLeaderLoanSwap then self:MaybePromptLeaderLoanSwap() end
 
+    -- OWNER RELOAD RECOVERY: InitializeSession kept a disk-restored loan whose owner is us and
+    -- flagged it to be ended here, AFTER this resolve ran with the pin (so _lastLoanOwner is set
+    -- and the next resolve arms role-in-transit exactly like a live cancel). EndMLLoan goes
+    -- through its normal owner gate: the pin made us the authority legitimately, no bypass. The
+    -- raid's mirrors still pin us, so the loan-less broadcast is accepted everywhere and fires
+    -- the standard role-restore path. Waits for a readable raid roster (the owner-left-voiding
+    -- gate); if bags settle and we are still ungrouped, we logged back in outside the raid and
+    -- there is nobody to tell: drop the leftover quietly.
+    if self._endRestoredLoan then
+        if not loan then
+            self._endRestoredLoan = nil          -- already ended some other way
+        elseif numRaidNow > 0 then
+            self._endRestoredLoan = nil
+            self:EndMLLoan("owner reloaded")
+        elseif self.bagSettleAt and GetTime() >= self.bagSettleAt then
+            self._endRestoredLoan = nil
+            local session = self:GetCurrentSession()
+            session.mlLoan = nil
+            self._lastLoanOwner = nil            -- ungrouped: no transit window to arm
+        end
+    end
+
     self:TriggerCallback("AUTHORITY_UPDATED")
 end
 

@@ -368,6 +368,150 @@ H.test("a foreign seized epoch lifts the real ML's high-water (self-heal on next
         "...but observed its epoch: the ml's next session out-ranks the seizure")
 end)
 
+H.test("cancel racing the pickup: a late LOANDONE settles the owed copy from the registry", function()
+    local w, lot = ownerWithInvisiblePhantom("Gorgarg")
+    w.addon:StartMLLoan(lot.id, "Gorgarg")
+    w.addon:EndMLLoan("cancelled")
+    H.check(w.addon:ActiveMLLoan() == nil, "sanity: loan cleared before the whisper lands")
+    local core = w.addon.lootCore
+    H.eq(core:Get(lot.id).awards[1].state, core.AWARD.OWED, "sanity: award still owed")
+
+    w.addon:OnLoanDoneMessage("Lexissa", { tostring(KEY_ID) })
+    H.eq(core:Get(lot.id).awards[1].state, core.AWARD.OWED, "an imposter cannot settle it")
+
+    w.addon:OnLoanDoneMessage("Gorgarg", { tostring(KEY_ID) })
+    H.eq(core:Get(lot.id).awards[1].state, core.AWARD.DELIVERED, "late LOANDONE recorded the delivery")
+    H.eq(core:Get(lot.id).awards[1].recipient, "Gorgarg", "to the borrower")
+    H.check(not (w.addon.phantomLoans and w.addon.phantomLoans[lot.id]), "pending loan cleared")
+    H.check(w.addon:ActiveMLLoan() == nil, "no loan resurrected")
+end)
+
+H.test("a late LOANDONE never settles a DIFFERENT active loan (back-to-back, same borrower)", function()
+    local w, lot = ownerWithInvisiblePhantom("Gorgarg")
+    w.addon:StartMLLoan(lot.id, "Gorgarg")
+    w.addon:EndMLLoan("cancelled")
+
+    -- second invisible phantom, same winner; loan B is running when A's whisper lands
+    local lot2 = w.addon.lootCore:MintPhantom(50505, 1)
+    lot2.invisibleToML = true
+    w.addon:StartLiveRoll(lot2.id)
+    w.addon:RegisterInterest(lot2.id, "Gorgarg", "ms")
+    w.addon:ResolveLiveRoll(lot2.id)
+    w.addon:StartMLLoan(lot2.id, "Gorgarg")
+
+    w.addon:OnLoanDoneMessage("Gorgarg", { tostring(KEY_ID) })   -- item A, not loan B's item
+    local core = w.addon.lootCore
+    H.eq(core:Get(lot.id).awards[1].state, core.AWARD.DELIVERED, "lot A settled off the registry")
+    local b = w.addon:ActiveMLLoan()
+    H.check(b ~= nil and b.lotId == lot2.id, "loan B untouched")
+    H.eq(core:Get(lot2.id).awards[1].state, core.AWARD.OWED, "lot B still owed")
+    H.check(w.addon.phantomLoans[lot2.id] ~= nil, "lot B's pending loan intact")
+end)
+
+-- Simulate the owner's /reload: runtime (non-SavedVariables) loan state dies with the UI; the
+-- session, loan included, restores from disk via InitializeSession.
+local function simulateReload(w)
+    local a = w.addon
+    a._loanPrompted = nil
+    a._lastLoanOwner = nil
+    a._loanRestorePending = nil
+    a._loanStartedAt = nil
+    a._loanAwaitingReady = nil
+    a._loanReadyNagged = nil
+    a._loanDoneSent = nil
+    a.phantomLoans = nil        -- in-memory registry: gone with the reload
+    a:InitializeSession()
+end
+
+H.test("owner /reload mid-loan: the restored loan ends through the front door, the raid converges", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local leader = makeWorld("Leadguy", true)
+    startSession(ml)
+    local lot = ml.addon.lootCore:MintPhantom(KEY_ID, 1)
+    lot.invisibleToML = true
+    ml.addon:StartLiveRoll(lot.id)
+    ml.addon:RegisterInterest(lot.id, "Gorgarg", "ms")
+    ml.addon:ResolveLiveRoll(lot.id)
+    ml.addon:StartMLLoan(lot.id, "Gorgarg")
+    clearWire(); ml.addon:BroadcastSession(); flushWireTo(leader)
+    H.check(leader.addon:ActiveMLLoan() ~= nil, "sanity: loan mirrored on the raid")
+
+    local shows = {}
+    leader.env.StaticPopup_Show = function(which, a1) shows[#shows + 1] = { which = which, arg = a1 }; return {} end
+
+    simulateReload(ml)
+    H.check(ml.addon:ActiveMLLoan() ~= nil, "restored loan KEPT: we are its owner")
+    H.check(ml.addon._endRestoredLoan == true, "flagged for the front-door end")
+    H.check(ml.addon.lootCore:Get(lot.id) ~= nil, "ledger (award included) survived the reload")
+
+    -- the game state mid-reload: the borrower holds the WoW role, the raid roster is readable
+    local swaps = {}
+    ml.env.SetLootMethod = function(method, name) swaps[#swaps + 1] = { method = method, name = name } end
+    clearWire()
+    mockRoster(ml, RAID3, 2)
+    H.check(ml.addon:ActiveMLLoan() == nil, "loan ended on the first readable-roster resolve")
+    H.check(not ml.addon._endRestoredLoan, "flag consumed")
+    H.eq(#swaps, 1, "owner-as-leader takes the WoW role back")
+    H.eq(swaps[1].name, "Masterlooter", "to themselves")
+
+    ml.addon:RefreshLootAuthority()   -- next resolve: role still with the borrower -> transit
+    H.check(ml.addon:IsAuthorizedLootMaster(), "authority retained (transit) while the role returns")
+
+    flushWireTo(leader)
+    H.check(leader.addon:ActiveMLLoan() == nil, "raid mirror cleared by the loan-less broadcast")
+    H.eq(#shows, 1, "restore popup fired on the leader")
+    H.eq(shows[1].which, "WEIRDLOOT_LOAN_RESTORE", "prompting the role return")
+end)
+
+H.test("a raider's disk-restored mirror of someone else's loan is still scrubbed", function()
+    local w = makeWorld("Saelinen", false)
+    w.addon.session.active = true
+    w.addon.session.mlLoan = { owner = "Masterlooter", borrower = "Gorgarg", itemId = KEY_ID }
+    w.addon:InitializeSession()
+    H.check(w.addon.session.mlLoan == nil, "mirror scrubbed on restore")
+    H.check(not w.addon._endRestoredLoan, "no front-door end armed for a foreign loan")
+end)
+
+H.test("owner reload OUTSIDE the raid: the leftover loan drops quietly once bags settle", function()
+    local w, lot = ownerWithInvisiblePhantom("Gorgarg")
+    w.addon:StartMLLoan(lot.id, "Gorgarg")
+    simulateReload(w)
+    H.check(w.addon:ActiveMLLoan() ~= nil and w.addon._endRestoredLoan == true, "kept + flagged")
+
+    -- logged back in ungrouped; bags not settled yet: the roster may still be loading -> hold
+    w.env.GetNumRaidMembers = function() return 0 end
+    w.env.GetLootMethod = function() return "freeforall" end
+    w.addon.bagSettleAt = F.CLOCK + 5
+    w.addon:RefreshLootAuthority()
+    H.check(w.addon:ActiveMLLoan() ~= nil, "held while the roster may still be loading")
+
+    -- bags settled, still ungrouped: there is nobody to broadcast to
+    clearWire()
+    w.addon.bagSettleAt = 0
+    w.addon:RefreshLootAuthority()
+    H.check(w.addon:ActiveMLLoan() == nil, "leftover dropped")
+    H.check(not w.addon._endRestoredLoan, "flag consumed")
+    H.eq(#F.WIRE, 0, "nothing broadcast")
+    w.addon:RefreshLootAuthority()
+    H.check(not w.addon:IsAuthorizedLootMaster(), "no lingering authority")
+end)
+
+H.test("mid-loan card carries Cancel Loan; cancelling reverts the card to the loan offer", function()
+    local w, lot = ownerWithInvisiblePhantom("Gorgarg")
+    w.addon:StartMLLoan(lot.id, "Gorgarg")
+    local card = w.addon._bannerItems[#w.addon._bannerItems]
+    H.check(card and card.onLoanCancel ~= nil, "mid-loan card exposes the cancel action")
+    H.check(not card.loanSend and not card.onAward, "no loan-offer flyout while the loan runs")
+
+    card.onLoanCancel()
+    H.check(w.addon:ActiveMLLoan() == nil, "cancel ended the loan")
+    local re = w.addon._bannerItems[#w.addon._bannerItems]
+    H.check(re.loanSend == true and re.onAward ~= nil, "card re-shown in the loan-offer state")
+    H.check(re.onLoanCancel == nil, "no cancel action once the loan ended")
+    H.eq(re.candidates[1].name, "Gorgarg", "the winner survives the cancel")
+end)
+
 H.test("loan encode/decode round-trips (including no-loan and older-client absence)", function()
     local w = makeWorld("Masterlooter", true)
     local loan = { owner = "Masterlooter", borrower = "Gorgarg", itemId = KEY_ID, lotId = "L:7" }
