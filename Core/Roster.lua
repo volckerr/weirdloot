@@ -213,6 +213,18 @@ function addon:RefreshLootAuthority()
         lootMasterName = playerName
     end
 
+    -- ML LOAN pin: while an item-scoped loan is active (MLLoan.lua), the WoW roster names the
+    -- BORROWER as master looter, but the addon session must stay with the loan's OWNER: authority
+    -- and the displayed ML both pin to the owner. This is what keeps the borrower from assuming
+    -- the session (the false->true transition below never fires for them) and keeps every raider
+    -- from seeing an ML change at all. Older clients without the loan field degrade to following
+    -- the roster.
+    local loan = self.ActiveMLLoan and self:ActiveMLLoan() or nil
+    if loan then
+        lootMasterName = loan.owner
+        isLootMaster = playerName ~= nil and util:NormalizeKey(loan.owner) == util:NormalizeKey(playerName)
+    end
+
     -- "Roster unreadable": master loot is on with partyMasterIndex == 0 (the API flags US as ML), but
     -- GetRaidRosterInfo cannot name our raid index yet, so the name-match above cannot confirm us and
     -- isLootMaster stays false. We flag and warn on this, but never self-grant from it: partyMasterIndex
@@ -265,6 +277,9 @@ function addon:RefreshLootAuthority()
         and util:NormalizeKey(lootMasterName) ~= util:NormalizeKey(prevMasterName or "") then
         self:RequestSessionSync()
     end
+
+    -- ML loan popups for the raid leader (no-op for everyone else; transition-tracked inside)
+    if self.MaybePromptLeaderLoanSwap then self:MaybePromptLeaderLoanSwap() end
 
     self:TriggerCallback("AUTHORITY_UPDATED")
 end

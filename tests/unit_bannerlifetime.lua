@@ -291,6 +291,38 @@ test("ML's phantom cards show the 'On Corpse' side tag; normal cards never do", 
     })
     pumpN(w, 0.01, 5)
     check(not winRow.OnCorpseTag:IsShown(), "tag clears once the copy is delivered")
+
+    -- INVISIBLE phantom (quest-gated drop the ML can't see): the tag reads "Phantom Drop" instead
+    w.addon:AddRollBannerItem({
+        key = "L:92", link = WON.link, icon = "x", quantity = 1,
+        rollDuration = 30, prio = "MS > OS", phantomDrop = true, isOwner = true, onMLEnd = function() end,
+    })
+    local ghostRow
+    for _ = 1, 60 do
+        F.pump(w, 0.001)
+        for _, f in ipairs(drops.LootFrames) do
+            if f.alive and f.rollDuration and f.rowKey == "L:92" then ghostRow = f end
+        end
+        if ghostRow then break end
+    end
+    check(ghostRow ~= nil, "invisible-phantom roll card landed")
+    check(ghostRow.OnCorpseTag:IsShown(), "side tag shown")
+    check((ghostRow.OnCorpseTag.__text or ""):find("Phantom Drop", 1, true) ~= nil, "tag reads Phantom Drop")
+
+    -- and a reused row flips its text back for the visible-unique kind
+    w.addon:AddLootBannerItem({
+        key = "L:93", link = WON.link, icon = "x", quantity = 1,
+        winners = WON.winners, corpseSend = true,
+        candidates = { { name = "Alice", class = "Mage", roll = 50, bracket = "MS" } },
+        onAward = function() end,
+    })
+    pumpN(w, 0.01, 5)
+    local sendRow
+    for _, f in ipairs(awarded(w).LootFrames) do
+        if f.alive and not f.rollDuration and f.rowKey == "L:93" then sendRow = f end
+    end
+    check(sendRow ~= nil and (sendRow.OnCorpseTag.__text or ""):find("On Corpse", 1, true) ~= nil,
+        "corpse-send card reads On Corpse")
 end)
 
 test("'Items still on corpse' header: one strip above the drops banner while any phantom is outstanding", function()
@@ -304,6 +336,13 @@ test("'Items still on corpse' header: one strip above the drops banner while any
 
     w.addon:RefreshRollsLeftBanner()
     check(not strip:IsShown(), "hidden with nothing outstanding")
+
+    -- an INVISIBLE phantom never shows the strip: the ML cannot re-loot a drop they cannot see
+    -- (the Phantom Drop side tag + loan flow carry that case)
+    local ghost = core:MintPhantom(60999, 1)
+    ghost.invisibleToML = true
+    w.addon:RefreshRollsLeftBanner()
+    check(not strip:IsShown(), "invisible phantom alone: no re-loot strip")
 
     local lotA = core:MintPhantom(60606, 1)
     core:MintPhantom(60607, 1)                    -- two outstanding items -> still ONE strip

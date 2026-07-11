@@ -349,9 +349,13 @@ function addon:SyncBuildSnapshot(emit)
         hasroster = self.guildRoster and 1 or 0,
         view = (self.guildRoster and self.guildRoster.canViewNotes) and 1 or 0,
         satisfied = self._gnotesSessionId == session.id and 1 or 0 })
+    -- 6th field: the active ML loan (MLLoan.lua), "" when none. Additive like fields 4/5; the
+    -- borrower and every raider need it to pin session authority to the loan's owner while the
+    -- WoW roster names the borrower.
     emit({ "M", self:GetLootMasterName() or "", tostring(core.seq or 0),
         self:IsLootMasterAcceptingTrades() and "1" or "0",
-        needsNotes and "1" or "0" })
+        needsNotes and "1" or "0",
+        self:EncodeMLLoan(session.mlLoan) })
     for _, attendee in ipairs(session.attendees or {}) do
         emit({ "A", attendee.name or "", attendee.className or "", attendee.specName or "", attendee.status or "nil" })
         -- "O" line: the ML's spec/status override for this attendee, so re-loggers and late
@@ -395,6 +399,8 @@ function addon:SyncApplySnapshot(lines, epoch)
             -- A missing 4th field (older ML) defaults to accepting, so we never warn on stale data.
             self._mlAcceptingTrades = (f[4] == nil) or (f[4] == "1")
             mlNeedsNotes = f[5] == "1"
+            -- the ML loan travels with the snapshot; nil (older ML / no loan) clears any stale one
+            self.session.mlLoan = self:DecodeMLLoan(f[6])
         elseif tag == "A" then
             self.session.attendees[#self.session.attendees + 1] = {
                 name = f[2], className = f[3], specName = f[4], status = f[5],
@@ -425,6 +431,9 @@ function addon:SyncApplySnapshot(lines, epoch)
     if mlNeedsNotes and self.MaybeServeGuildNotes then
         self:MaybeServeGuildNotes(self.roster.lootMasterName, epoch)
     end
+    -- The loan just (dis)appeared with this snapshot: re-resolve authority so the pin applies
+    -- before any roster event arrives (the borrower must be pinned BEFORE their role flips).
+    if self.RefreshLootAuthority then self:RefreshLootAuthority() end
 end
 
 -- Host delta applier (raider): one lot upsert.
@@ -670,6 +679,8 @@ function addon:HandleCommMessage(sender, value)
         self:OnWinMessage(fields)
     elseif command == "CANCEL" then
         self:OnCancelMessage(fields)
+    elseif command == "LOANDONE" then
+        self:OnLoanDoneMessage(sender, fields)
     elseif command == "RSTATE" then
         self:OnRollStateMessage(fields)
     elseif command == "GUEST_UPSERT" then

@@ -165,6 +165,35 @@ StaticPopupDialogs["WEIRDLOOT_END_SESSION"] = {
     showAlert = 1,
 }
 
+-- ML loan (MLLoan.lua): when the loan's OWNER is not the raid leader, the LEADER's client prompts
+-- them to perform the role swaps (only the leader can SetLootMethod). data = the player to hand
+-- the WoW master-looter role to; the loan transitions drive these via MaybePromptLeaderLoanSwap.
+StaticPopupDialogs["WEIRDLOOT_LOAN_SWAP"] = {
+    text = "WeirdLoot: lend master loot to %s so they can pick up %s?",
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function(self)
+        if SetLootMethod and self.data then SetLootMethod("master", self.data) end
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+    showAlert = 1,
+}
+
+StaticPopupDialogs["WEIRDLOOT_LOAN_RESTORE"] = {
+    text = "WeirdLoot: the loaned item was picked up. Return master loot to %s?",
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function(self)
+        if SetLootMethod and self.data then SetLootMethod("master", self.data) end
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+    showAlert = 1,
+}
+
 StaticPopupDialogs["WEIRDLOOT_START_SESSION"] = {
     text = "Start a WeirdLoot session for this raid?",
     button1 = YES,

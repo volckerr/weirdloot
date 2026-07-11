@@ -143,7 +143,14 @@ function addon:WarnMissingQuestDrops()
     end
     if present then return end
 
-    self:LootAlert("This kill always drops " .. entry.label .. ", but it is NOT in your loot. You likely cannot see it (quest already done). Have an eligible looter loot the corpse NOW, before it despawns.")
+    self:LootAlert("This kill always drops " .. entry.label .. ", but it is NOT in your loot. You likely cannot see it (quest already done). It rolls now; the winner picks it up via a master-loot loan.")
+    -- Roll the invisible drop as a phantom. invisibleToML routes its resolve to the LOAN flow
+    -- (the ML can never assign a slot they cannot see, so the corpse-send path is useless here).
+    -- Local-only field: the owner's client decides the flavor; raiders roll it like any drop.
+    if expected and self.lootCore then
+        local lot = self.lootCore:MintPhantom(expected, 1)
+        lot.invisibleToML = true
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -177,16 +184,32 @@ end
 -- Registry shape: addon.phantomSends[lotId] = { itemId = N, target = "name" }. LiveRoll registers
 -- an entry when a phantom lot resolves with a winner; the ML (or the card's flyout) may retarget.
 
--- Any phantom copy still physically sitting on a corpse: an unresolved phantom lot (its roll is
--- queued or running) or a resolved one whose master-loot send has not completed. ML only: the
--- header this drives instructs the ML to re-loot, and phantom lots also exist on raider mirrors.
+-- Any phantom copy the ML still needs to RE-LOOT: an unresolved VISIBLE phantom (its roll queued
+-- or running) or a pending corpse send. Drives the "re-loot the corpse" header strip, so
+-- INVISIBLE phantoms are deliberately excluded: the ML cannot see those in any loot window and
+-- re-looting achieves nothing (the loan flow + the Phantom Drop side tag carry that case).
+-- ML only: phantom lots also exist on raider mirrors.
 function addon:HasCorpseLootOutstanding()
     if not self:IsAuthorizedLootMaster() then return false end
     if self.phantomSends and next(self.phantomSends) then return true end
     local core = self.lootCore
     if not core then return false end
     for _, lot in ipairs(core:List()) do
-        if lot.phantom and lot.state ~= core.STATE.RESOLVED then return true end
+        if lot.phantom and not lot.invisibleToML and lot.state ~= core.STATE.RESOLVED then return true end
+    end
+    return false
+end
+
+-- Mark the phantom lot's owed copy for `recipient` delivered (the one back-channel shared by the
+-- corpse-send confirm and the loan fulfillment). Precise by lot id, never by bag inference.
+function addon:MarkPhantomAwardDelivered(lotId, recipient)
+    local core = self.lootCore
+    local lot = core and core:Get(lotId)
+    if not lot or not lot.awards then return false end
+    for idx, a in ipairs(lot.awards) do
+        if a.state == core.AWARD.OWED and a.winner == recipient then
+            return core:MarkDelivered(lotId, idx, recipient)
+        end
     end
     return false
 end
@@ -223,14 +246,7 @@ end
 function addon:OnPhantomSendCleared(lotId, target)
     local core = self.lootCore
     local lot = core and core:Get(lotId)
-    if lot and lot.awards then
-        for idx, a in ipairs(lot.awards) do
-            if a.state == core.AWARD.OWED and a.winner == target then
-                core:MarkDelivered(lotId, idx, target)
-                break
-            end
-        end
-    end
+    self:MarkPhantomAwardDelivered(lotId, target)
     if self.phantomSends then self.phantomSends[lotId] = nil end
 
     local _, link = util:ItemRender(lot and lot.itemId)

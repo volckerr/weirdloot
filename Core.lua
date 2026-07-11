@@ -516,6 +516,8 @@ function addon:BAG_UPDATE()
     -- Coalesce the loot-time BAG_UPDATE burst into one scan; see ScheduleBagReconcile. Out-of-band
     -- triggers (loot tab open, Start Roll, expiry timer) still run OnBagUpdate synchronously.
     self:ScheduleBagReconcile()
+    -- loan borrower: the loaned item just landing in our bags is the fulfillment signal
+    if self.MaybeFulfillLoanPickup then self:MaybeFulfillLoanPickup() end
 end
 
 function addon:PLAYER_REGEN_ENABLED()
@@ -617,6 +619,12 @@ function addon:HandleSlashCommand(msg)
             and "ON (new loot lands as Skipped; revisit from the loot tab)."
             or "OFF."))
         if self.RefreshOptionsTab then self:RefreshOptionsTab() end
+    elseif command == "loan cancel" or command == "loancancel" then
+        if self:ActiveMLLoan() then
+            self:EndMLLoan("cancelled")
+        else
+            self:Print("No master-loot loan is active.")
+        end
     elseif command == "deer" or string.sub(command, 1, 5) == "deer " then
         local name = string.match(string.trim(msg or ""), "^%S+%s+(.+)$")
         if name and string.trim(name) ~= "" then

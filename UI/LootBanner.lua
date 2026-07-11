@@ -273,14 +273,17 @@ end
 -- or a plain win card, which carry no candidates/onAward.
 local function populateLCFlyout(frame, data)
     local cands = data.candidates
-    if not ((data.lootCouncil or data.corpseSend) and data.onAward and cands and #cands > 0) then
+    if not ((data.lootCouncil or data.corpseSend or data.loanSend) and data.onAward and cands and #cands > 0) then
         frame.LCFlyout:Hide()
         return false
     end
     local total = data.copiesTotal or 1
     local remaining = data.copiesRemaining or total
     local nextCopy = math.min(total - remaining + 1, total)
-    if data.corpseSend then
+    if data.loanSend then
+        -- invisible phantom: rows lend the WoW ML role so the picked player collects the drop
+        frame.LCFlyoutHeader:SetText("|cffffd200Loan master loot to|r")
+    elseif data.corpseSend then
         -- phantom send card: rows retarget the pending master-loot send, not an LC award
         frame.LCFlyoutHeader:SetText("|cffffd200Send from corpse to|r")
     else
@@ -321,14 +324,17 @@ local function rollPrioText(prio)
     return "|cffffffffPrio:|r " .. ((prio and prio ~= "") and prio or addon.DEFAULT_PRIO)
 end
 
--- "On Corpse" side tag: a phantom's copy is still on the boss, so the ML's card carries a red tag
--- NEXT TO it on the ML-controls side (outside the End/Cancel rail on a roll card; under the send
--- flyout on a win card) so the banner can never read as "every drop is in my bags". Hidden on any
--- card without the flag (rows are pooled, so this runs on every configure).
+-- Phantom side tag: the ML's card carries a tag NEXT TO it on the ML-controls side (outside the
+-- End/Cancel rail on a roll card; under the send/loan flyout on a win card) so the banner can
+-- never read as "every drop is in my bags". Two variants: "On Corpse" (a copy the ML can see but
+-- not pick up) and "Phantom Drop" (an invisible quest-gated drop the ML's loot view filtered out
+-- entirely; do not look for it in the window or bags). Hidden on any card without a flag (rows
+-- are pooled, so this runs on every configure).
 local function positionOnCorpseTag(frame, data)
     local tag = frame.OnCorpseTag
     if not tag then return end
-    if not (data.onCorpse or data.corpseSend) then tag:Hide(); return end
+    if not (data.onCorpse or data.corpseSend or data.phantomDrop) then tag:Hide(); return end
+    tag:SetText(data.phantomDrop and "|cffff6060Phantom Drop|r" or "|cffff6060On Corpse|r")
     tag:ClearAllPoints()
     local left = bannerMLSide() == "LEFT"
     if data.rollDuration and (data.onMLEnd or data.onMLCancel) and frame.MLButtons[1] then
@@ -919,9 +925,9 @@ local function buildBanner(bannerName, medallionCfg)
         PlayerName:SetSize(204, 0)
         PlayerName:SetPoint("TOPLEFT", ItemName, "BOTTOMLEFT", 0, 0)
 
-        -- "On Corpse" side tag (phantom lots); anchored per card type in positionOnCorpseTag
+        -- phantom side tag ("On Corpse" / "Phantom Drop"); text + anchor set per card type in
+        -- positionOnCorpseTag
         frame.OnCorpseTag = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        frame.OnCorpseTag:SetText("|cffff6060On Corpse|r")
         frame.OnCorpseTag:Hide()
 
         frame.IconHitBox = CreateFrame("Frame", nil, frame)
@@ -1874,7 +1880,9 @@ local function buildBanner(bannerName, medallionCfg)
             noWinner = item.noWinner,   -- won card only: nobody rolled -> "No one rolled" line + reroll
             lootCouncil = item.lootCouncil, -- won card only: LC item -> "Loot Council" line + roll breakdown
             corpseSend = item.corpseSend,   -- won card (ML): phantom copy on the corpse awaiting master-loot send
+            loanSend = item.loanSend,       -- won card (ML): invisible phantom; flyout starts an ML loan instead
             onCorpse = item.onCorpse,       -- roll card (ML): phantom copy still on the corpse while it rolls
+            phantomDrop = item.phantomDrop, -- roll/won card (ML): INVISIBLE phantom (drop the ML can't see)
             candidates = item.candidates,   -- LC/send flyout rows { name, class, roll, bracket }
             onAward = item.onAward,         -- LC: award next copy; send card: retarget the pending send
             copiesTotal = item.copiesTotal, -- LC award card (ML): total copies (multi-copy header)

@@ -518,7 +518,7 @@ self.ADDON_FILES = {
     "Data/BlacklistPresets/Paladin.lua", "Data/BlacklistPresets/Warlock.lua",
     "Data/ItemInfo.lua", "Data/LootPrios.lua",
     "Loot/LootCore.lua", "Loot/Resolver.lua", "Loot/Session.lua", "Loot/LiveRoll.lua", "Loot/AutoLoot.lua",
-    "Loot/LootObserver.lua",
+    "Loot/LootObserver.lua", "Loot/MLLoan.lua",
     "Trade/TradeDeliver.lua", "Trade/Payout.lua",
     "UI/Popups.lua",
 }

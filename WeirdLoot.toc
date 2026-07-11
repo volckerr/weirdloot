@@ -43,6 +43,7 @@ Loot\Session.lua
 Loot\LiveRoll.lua
 Loot\AutoLoot.lua
 Loot\LootObserver.lua
+Loot\MLLoan.lua
 
 Trade\TradeDeliver.lua
 Trade\Payout.lua
