@@ -86,7 +86,17 @@ function addon:InitializeComm()
         buildSnapshot  = function(emit) self:SyncBuildSnapshot(emit) end,
         applySnapshot  = function(lines, ep) self:SyncApplySnapshot(lines, ep) end,
         applyLine      = function(fields) self:SyncApplyLine(fields) end,
-        log            = function(ev, data) self:LogCoreEvent(ev, data) end,
+        log            = function(ev, data)
+            -- Self-healing epoch observation: even state we REJECT (foreign sender, stale-epoch)
+            -- raises our high-water, so the next session we mint out-ranks any stray seized epoch
+            -- (a divergent peer otherwise rejects the real ML as stale FOREVER; see the loan-edge
+            -- grace in Roster.lua for how such an epoch gets minted in the first place).
+            if data then
+                if data.epoch then self:ObserveEpoch(data.epoch) end
+                if data.curEpoch then self:ObserveEpoch(data.curEpoch) end
+            end
+            self:LogCoreEvent(ev, data)
+        end,
         -- Retry schedule: flatter than a steep exponential so a resync after a gap/reload recovers on a
         -- steady cadence. 1.0s first resend lets a message land before we retry; 1.3x growth keeps a
         -- ~24s give-up horizon. Heartbeat re-announces rev every 30s so a quiet-session miss self-heals.
@@ -681,6 +691,8 @@ function addon:HandleCommMessage(sender, value)
         self:OnCancelMessage(fields)
     elseif command == "LOANDONE" then
         self:OnLoanDoneMessage(sender, fields)
+    elseif command == "LOANREADY" then
+        self:OnLoanReadyMessage(sender, fields)
     elseif command == "RSTATE" then
         self:OnRollStateMessage(fields)
     elseif command == "GUEST_UPSERT" then

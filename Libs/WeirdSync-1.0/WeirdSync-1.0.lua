@@ -190,7 +190,10 @@ function Channel:OnReceive(sender, value)
     if t == "SNAP" or t == "D" or t == "H" then
         local auth = self.cb.authorityName()
         if not auth or auth == "" or normName(sender) ~= normName(auth) then
-            self.cb.log("drop-foreign", { from = sender, t = t })
+            -- carry the foreign state's epoch (SNAP/H field 2) so the host can lift its epoch
+            -- high-water: a stray seized session must not permanently out-rank the real
+            -- authority's NEXT session just because the authority refused to apply it
+            self.cb.log("drop-foreign", { from = sender, t = t, epoch = (t ~= "D") and f[2] or nil })
             return
         end
     end

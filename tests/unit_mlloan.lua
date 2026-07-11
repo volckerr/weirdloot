@@ -24,6 +24,8 @@ local KEY_ID = 44569   -- Key to the Focusing Iris (the canonical invisible drop
 
 -- Flip a world's WoW roster so `name` is the master looter at raid index 1 (rank keeps the
 -- original leader semantics: the running player stays raid leader so SetLootMethod paths run).
+-- CRUDE: the roster contains only `name` + the running player, so with a loan active this also
+-- exercises owner-left voiding. Use mockRoster/RAID3 when the whole group must stay present.
 local function flipWoWMLTo(w, name)
     local player = w.player
     w.env.GetRaidRosterInfo = function(i)
@@ -32,6 +34,20 @@ local function flipWoWMLTo(w, name)
     end
     w.addon:RefreshLootAuthority()
 end
+
+-- A realistic 3-member roster whose master-looter index the test controls: members is an array of
+-- { name, rank }, mlIndex points at the current WoW master looter. Applies + re-resolves.
+local function mockRoster(w, members, mlIndex)
+    w.env.GetNumRaidMembers = function() return #members end
+    w.env.GetRaidRosterInfo = function(i)
+        local m = members[i]
+        if not m then return nil end
+        return m.name, m.rank or 0
+    end
+    w.env.GetLootMethod = function() return "master", 0, mlIndex end
+    w.addon:RefreshLootAuthority()
+end
+local RAID3 = { { name = "Masterlooter", rank = 2 }, { name = "Gorgarg" }, { name = "Saelinen" } }
 
 -- Owner world with an active session and a resolved invisible phantom owed to `winner`.
 local function ownerWithInvisiblePhantom(winner)
@@ -45,11 +61,27 @@ local function ownerWithInvisiblePhantom(winner)
     return w, lot
 end
 
-H.test("invisible phantom resolve registers a pending loan, not a corpse send", function()
-    local w, lot = ownerWithInvisiblePhantom("Gorgarg")
+H.test("invisible phantom resolve: pending loan, no corpse send, ONE loan candidate (the winner)", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    local lot = w.addon.lootCore:MintPhantom(KEY_ID, 1)
+    lot.invisibleToML = true
+    w.addon:StartLiveRoll(lot.id)
+    w.addon:RegisterInterest(lot.id, "Gorgarg", "ms")
+    w.addon:RegisterInterest(lot.id, "Lexissa", "os")   -- a losing roller must NOT appear as a loan choice
+    local captured
+    local orig = w.addon.AddLootBannerItem
+    w.addon.AddLootBannerItem = function(self, item) captured = item; return orig(self, item) end
+    w.addon:ResolveLiveRoll(lot.id)
+    w.addon.AddLootBannerItem = orig
+
     H.check(w.addon.phantomLoans and w.addon.phantomLoans[lot.id] ~= nil, "pending loan registered")
     H.eq(w.addon.phantomLoans[lot.id].target, "Gorgarg", "loan targets the winner")
     H.check(not (w.addon.phantomSends and w.addon.phantomSends[lot.id]), "no corpse send for an invisible drop")
+    H.check(w.addon:ActiveMLLoan() == nil, "the loan does NOT auto-start: the card click triggers it")
+    H.check(captured ~= nil and captured.loanSend == true, "loan card shown with the loan action")
+    H.eq(#(captured.candidates or {}), 1, "exactly one loan row: who was decided by the roll")
+    H.eq(captured.candidates[1].name, "Gorgarg", "and it is the winner")
 end)
 
 H.test("StartMLLoan stamps the session; owner keeps authority when the WoW roster flips", function()
@@ -65,10 +97,11 @@ H.test("StartMLLoan stamps the session; owner keeps authority when the WoW roste
     H.check(w.addon:IsAuthorizedLootMaster(), "owner STAYS addon-authorized during the loan")
     H.eq(w.addon:GetLootMasterName(), "Masterlooter", "displayed ML stays the owner")
 
-    -- and WITHOUT the loan the same flip would have dropped authority (the pin is the difference)
+    -- clearing the loan enters ROLE IN TRANSIT: the owner keeps authority (continuity: heartbeats
+    -- and resolves never stop during the swap-back) until the roster settles on them again
     w.addon:GetCurrentSession().mlLoan = nil
     w.addon:RefreshLootAuthority()
-    H.check(not w.addon:IsAuthorizedLootMaster(), "sanity: same roster without the loan = no authority")
+    H.check(w.addon:IsAuthorizedLootMaster(), "in transit: the owner retains authority until the roster settles")
 end)
 
 H.test("borrower never assumes the session when their WoW role flips mid-loan", function()
@@ -89,7 +122,7 @@ H.test("borrower never assumes the session when their WoW role flips mid-loan", 
     H.eq(mirrored.owner, "Masterlooter", "owner mirrored")
 
     local epochBefore = borrower.addon.session.id
-    flipWoWMLTo(borrower, "Gorgarg")   -- now the game names the borrower master looter
+    mockRoster(borrower, RAID3, 2)     -- the game names the borrower ML; the owner stays in raid
     H.check(not borrower.addon:IsAuthorizedLootMaster(), "borrower is NOT addon-authorized")
     H.eq(borrower.addon:GetLootMasterName(), "Masterlooter", "borrower still shows the owner as ML")
     H.eq(borrower.addon.session.id, epochBefore, "no session seizure: the epoch is untouched")
@@ -180,6 +213,40 @@ H.test("raid leader (not the owner) is prompted to swap on loan start and restor
     H.eq(shows[2].arg, "Masterlooter", "prompting to return the role to the owner")
 end)
 
+H.test("role swap is gated on the borrower's LOANREADY ack (the propagation-race fix)", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local borrower = makeWorld("Gorgarg", false)
+    startSession(ml)
+    local lot = ml.addon.lootCore:MintPhantom(KEY_ID, 1)
+    lot.invisibleToML = true
+    ml.addon:StartLiveRoll(lot.id)
+    ml.addon:RegisterInterest(lot.id, "Gorgarg", "ms")
+    ml.addon:ResolveLiveRoll(lot.id)
+
+    local swaps = {}
+    ml.env.SetLootMethod = function(method, name) swaps[#swaps + 1] = { method = method, name = name } end
+    local whispers = {}
+    ml.env.ChatThrottleLib = nil
+    ml.env.SendChatMessage = function(msg, _, _, target) whispers[#whispers + 1] = { msg = msg, target = target } end
+
+    ml.addon:StartMLLoan(lot.id, "Gorgarg")
+    H.eq(#swaps, 0, "NO swap at loan start: SetLootMethod must not race the snapshot")
+    H.check(ml.addon._loanAwaitingReady ~= nil, "owner is waiting for the borrower's ack")
+
+    ml.addon:OnLoanReadyMessage("Lexissa", { tostring(KEY_ID) })
+    H.eq(#swaps, 0, "an imposter's ack is ignored")
+
+    clearWire(); ml.addon:BroadcastSession(); flushWireTo(borrower)   -- loan lands -> borrower acks
+    flushWireTo(ml)                                                   -- ack reaches the owner
+    H.eq(#swaps, 1, "swap fired only after the borrower confirmed the loan")
+    H.eq(swaps[1].name, "Gorgarg", "role handed to the borrower")
+    H.eq(#whispers, 1, "borrower whispered their pickup instruction")
+    H.check(whispers[1].target == "Gorgarg" and whispers[1].msg:find("master loot", 1, true) ~= nil,
+        "whisper tells them to loot the item")
+    H.check(not ml.addon._loanAwaitingReady, "ack consumed")
+end)
+
 H.test("LC-ruled phantom: the council award engages the pickup machinery (loan or send)", function()
     -- invisible phantom + LC rule: awarding via the LC flyout must register the pending LOAN
     local w = makeWorld("Masterlooter", true)
@@ -210,6 +277,95 @@ H.test("LC-ruled phantom: the council award engages the pickup machinery (loan o
     w2.addon:AwardLootCouncilCopy(lot2.id, "Lexissa")
     H.check(w2.addon.phantomSends and w2.addon.phantomSends[lot2.id] ~= nil, "council pick registered the corpse send")
     H.check(not (w2.addon.phantomLoans and w2.addon.phantomLoans[lot2.id]), "no loan for a visible phantom")
+end)
+
+-- owner (ml world) + a synced bystander with a loan taken through start AND clear
+local function bystanderThroughLoanClear()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local bystander = makeWorld("Saelinen", false)
+    startSession(ml)
+    local lot = ml.addon.lootCore:MintPhantom(KEY_ID, 1)
+    lot.invisibleToML = true
+    ml.addon:StartLiveRoll(lot.id)
+    ml.addon:RegisterInterest(lot.id, "Gorgarg", "ms")
+    ml.addon:ResolveLiveRoll(lot.id)
+    ml.addon:StartMLLoan(lot.id, "Gorgarg")
+    clearWire(); ml.addon:BroadcastSession(); flushWireTo(bystander)   -- loan seen: pin active
+    mockRoster(bystander, RAID3, 2)          -- WoW role sits with the borrower, as in a real loan
+    ml.addon:EndMLLoan("delivered")
+    clearWire(); ml.addon:BroadcastSession(); flushWireTo(bystander)   -- clear seen: transit armed
+    return ml, bystander
+end
+
+H.test("role-in-transit: after the clear, only the owner's return is believed", function()
+    local _, bystander = bystanderThroughLoanClear()
+
+    -- clear applied while the roster still names the borrower: guard holds the script's answer
+    H.eq(bystander.addon:GetLootMasterName(), "Masterlooter", "in transit: still answers the owner")
+    H.check(not bystander.addon:IsAuthorizedLootMaster(), "in transit: no authority")
+
+    -- the 3.3.5 transient: mid-shuffle the roster suddenly names the BYSTANDER themselves
+    local epochBefore = bystander.addon.session.id
+    mockRoster(bystander, RAID3, 3)
+    H.check(not bystander.addon:IsAuthorizedLootMaster(), "poisoned self-read refused while in transit")
+    H.eq(bystander.addon:GetLootMasterName(), "Masterlooter", "surprise authority not adopted")
+    H.eq(bystander.addon.session.id, epochBefore, "no assume: no divergent epoch minted")
+
+    -- the DISARM EVENT: the roster confirms the owner took the role back
+    mockRoster(bystander, RAID3, 1)
+    H.eq(bystander.addon:GetLootMasterName(), "Masterlooter", "restore landed")
+    H.check(not bystander.addon:IsAuthorizedLootMaster(), "bystander is of course not the ML")
+
+    -- guard is gone: a LATER genuine handoff to the bystander lands normally
+    mockRoster(bystander, RAID3, 3)
+    H.check(bystander.addon:IsAuthorizedLootMaster(), "a real promotion after the transit gains normally")
+end)
+
+H.test("owner leaving the raid voids an ACTIVE loan on every client", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local raider = makeWorld("Saelinen", false)
+    startSession(ml)
+    local lot = ml.addon.lootCore:MintPhantom(KEY_ID, 1)
+    lot.invisibleToML = true
+    ml.addon:StartLiveRoll(lot.id)
+    ml.addon:RegisterInterest(lot.id, "Gorgarg", "ms")
+    ml.addon:ResolveLiveRoll(lot.id)
+    ml.addon:StartMLLoan(lot.id, "Gorgarg")
+    clearWire(); ml.addon:BroadcastSession(); flushWireTo(raider)
+    H.check(raider.addon:ActiveMLLoan() ~= nil, "loan mirrored")
+
+    -- the owner drops from the raid; the raider's own roster observation voids the loan
+    mockRoster(raider, { { name = "Gorgarg" }, { name = "Saelinen" } }, 1)
+    H.check(raider.addon:ActiveMLLoan() == nil, "loan voided locally: no absent-owner pin")
+end)
+
+H.test("owner leaving during TRANSIT disarms the guard so manual recovery works", function()
+    local _, bystander = bystanderThroughLoanClear()
+    H.check(not bystander.addon:IsAuthorizedLootMaster(), "sanity: in transit, guard holding")
+
+    -- owner gone AND the leader hands ML to the bystander: recovery must not be fought
+    mockRoster(bystander, { { name = "Gorgarg" }, { name = "Saelinen", rank = 2 } }, 2)
+    H.check(bystander.addon:IsAuthorizedLootMaster(), "guard disarmed on owner departure: recovery lands")
+end)
+
+H.test("a foreign seized epoch lifts the real ML's high-water (self-heal on next session)", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local seizer = makeWorld("Saelinen", false)
+    startSession(ml)
+    clearWire(); ml.addon:BroadcastSession(); flushWireTo(seizer)   -- live mirror on the seizer
+
+    flipWoWMLTo(seizer, "Saelinen")                                  -- simulated pre-fix seizure
+    H.check(seizer.addon:IsAuthorizedLootMaster(), "sanity: seizer became authority (no loan grace armed)")
+    local seizedEpoch = tonumber(seizer.addon.session.id)
+    H.check(seizedEpoch ~= nil, "sanity: seized session has a numeric epoch")
+
+    clearWire(); seizer.addon:BroadcastSession(); flushWireTo(ml)    -- ml REJECTS it as foreign...
+    H.eq(ml.addon:GetLootMasterName(), "Masterlooter", "ml did not adopt the foreign session")
+    H.check((ml.addon.sessionDb.epochHigh or 0) >= seizedEpoch,
+        "...but observed its epoch: the ml's next session out-ranks the seizure")
 end)
 
 H.test("loan encode/decode round-trips (including no-loan and older-client absence)", function()

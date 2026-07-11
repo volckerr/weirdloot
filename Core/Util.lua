@@ -710,3 +710,15 @@ function util:RollTierAvailability(item, isAllowed, isLocked, blockReason, hasPr
     end
     return out
 end
+
+-- Plain chat whisper (not addon comm), throttled through CTL when present. The bracketed addon
+-- name tells the recipient a bot sent it.
+function util:WhisperChat(target, text)
+    local msg = "[WeirdLoot] " .. text
+    local ctl = ChatThrottleLib
+    if ctl then
+        ctl:SendChatMessage("ALERT", "WeirdLoot", msg, "WHISPER", nil, target)
+    else
+        SendChatMessage(msg, "WHISPER", nil, target)
+    end
+end

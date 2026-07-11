@@ -2089,6 +2089,8 @@ function addon:AwardLootCouncilCopy(lotId, winner)
         if lot.invisibleToML then
             self.phantomLoans = self.phantomLoans or {}
             self.phantomLoans[lotId] = { itemId = lot.itemId, target = winner }
+            -- The council pick decided WHO; the loan card's single row (that winner) is the
+            -- deliberate one-click trigger for WHEN the ML's role leaves their hands.
             self:ShowPhantomLoanCard(lotId)
             self:Print("Click " .. winner .. " on the win card to lend them master loot for the pickup.")
         else
@@ -2159,7 +2161,15 @@ function addon:ShowPhantomLoanCard(lotId)
         local loan = self:ActiveMLLoan()
         if not (loan and loan.lotId == lotId) then
             item.loanSend = true
-            item.candidates = self:LootCouncilCandidates(name, sections)
+            -- Singular by design: the loan can only go to the WINNER (the pickup belongs to
+            -- whoever the roll/council decided on, so there is nothing to choose). One row,
+            -- one click: the ML controls WHEN the role leaves their hands, not who gets it.
+            local target = pending.target
+            local cand
+            for _, c in ipairs(self:LootCouncilCandidates(name, sections)) do
+                if util:NormalizeKey(c.name) == util:NormalizeKey(target) then cand = c; break end
+            end
+            item.candidates = { cand or { name = target } }
             item.onAward = function(who) self:StartMLLoan(lotId, who) end
         end
         item.onReroll = function()

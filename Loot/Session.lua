@@ -170,6 +170,9 @@ function addon:InitializeSession()
     -- NOT a live mirror: clear the runtime flag so a takeover never rebroadcasts stale leftover loot.
     self:ObserveEpoch(self.session.id)
     self._mirrorActive = false
+    -- A loan never survives its owner's reload: the borrower's one-shot LOANDONE was likely lost
+    -- while we were gone, so a disk-restored loan would re-assert a pin nobody can ever release.
+    self.session.mlLoan = nil
 
     -- self.session is the persisted record, so it must not carry the loot projection: that would
     -- write loot state to disk a second time, beside the authoritative ledger. Keep it absent.

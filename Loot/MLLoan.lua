@@ -18,7 +18,7 @@ local util = addon.util
 -- and "/wl loan cancel".
 
 local LOAN_TIMEOUT = 300      -- seconds before an unfulfilled loan auto-cancels (owner side)
-local SWAP_DELAY = 1.0        -- broadcast-to-SetLootMethod gap: let the loan flag outrun the roster flip
+local READY_NAG_AFTER = 10    -- seconds without the borrower's LOANREADY before telling the owner to swap manually
 
 -- The current loan, from this client's session mirror (owner and raiders alike), or nil.
 function addon:ActiveMLLoan()
@@ -53,20 +53,6 @@ local function isSelfRaidLeader()
     return false
 end
 
--- Delayed SetLootMethod: fires once, SWAP_DELAY after StartMLLoan, so the loan broadcast reaches
--- the borrower before PARTY_LOOT_METHOD_CHANGED does (a borrower whose roster flips before the
--- loan lands would seize the session, the exact failure the loan exists to prevent).
-local swapTimer = CreateFrame("Frame")
-swapTimer:Hide()
-swapTimer:SetScript("OnUpdate", function(f)
-    if not addon._loanSwapAt or GetTime() < addon._loanSwapAt then return end
-    addon._loanSwapAt = nil
-    f:Hide()
-    local target = addon._loanSwapTo
-    addon._loanSwapTo = nil
-    if target and SetLootMethod then SetLootMethod("master", util:StripRealm(target)) end
-end)
-
 -- Owner backstop ticker: cancel a loan that never fulfills (timeout) or whose borrower left.
 local loanTicker = CreateFrame("Frame")
 loanTicker:Hide()
@@ -80,6 +66,12 @@ loanTicker:SetScript("OnUpdate", function(f, elapsed)
         addon:EndMLLoan("timed out with no pickup")
     elseif addon.GetAttendee and not addon:GetAttendee(util:NormalizeKey(loan.borrower)) then
         addon:EndMLLoan(loan.borrower .. " left the raid")
+    elseif addon._loanAwaitingReady and not addon._loanReadyNagged
+        and GetTime() - (addon._loanStartedAt or 0) > READY_NAG_AFTER then
+        -- an older-version borrower never acks: fall back to the manual path that works on
+        -- human latency (the snapshot has long since landed by the time a person reacts)
+        addon._loanReadyNagged = true
+        addon:Print(loan.borrower .. " has not confirmed the loan (older WeirdLoot?). Have the raid leader make them master looter by hand; they then loot the item normally.")
     end
 end)
 
@@ -103,6 +95,13 @@ function addon:StartMLLoan(lotId, borrower)
         lotId = lotId,
     }
     self._loanStartedAt = GetTime()
+    -- The role swap is GATED on the borrower's LOANREADY ack (OnLoanReadyMessage): SetLootMethod
+    -- flips the roster near-instantly while the loan snapshot crawls the throttled comm lane, so
+    -- swapping on a timer races the propagation -- a borrower whose roster flips first has no pin
+    -- yet and seizes the session, minting the whole corpse as fresh drops. The ack is proof the
+    -- pin is live on the one client where it matters.
+    self._loanAwaitingReady = true
+    self._loanReadyNagged = nil
     if self.phantomLoans and self.phantomLoans[lotId] then
         self.phantomLoans[lotId].target = borrower
     end
@@ -111,12 +110,9 @@ function addon:StartMLLoan(lotId, borrower)
     local _, link = util:ItemRender(lot.itemId)
     local shown = link or ("item " .. tostring(lot.itemId))
     if isSelfRaidLeader() then
-        self._loanSwapAt = GetTime() + SWAP_DELAY
-        self._loanSwapTo = borrower
-        swapTimer:Show()
-        self:Print("Lending master loot to " .. borrower .. " for " .. shown .. ". They loot it; the role comes back automatically.")
+        self:Print("Lending master loot to " .. borrower .. " for " .. shown .. ": waiting for their addon to confirm, then the role swaps automatically.")
     else
-        self:Print("Loan set for " .. shown .. ", but only the raid leader can swap the role: have them make " .. borrower .. " master looter now.")
+        self:Print("Loan set for " .. shown .. ": once " .. borrower .. " confirms, have the raid leader make them master looter (they will be prompted).")
     end
     loanTicker.accum = 0
     loanTicker:Show()
@@ -133,8 +129,8 @@ function addon:EndMLLoan(reason)
     local session = self:GetCurrentSession()
     session.mlLoan = nil
     self._loanStartedAt = nil
-    self._loanSwapAt = nil
-    self._loanSwapTo = nil
+    self._loanAwaitingReady = nil
+    self._loanReadyNagged = nil
     loanTicker:Hide()
     self:AutoBroadcastSession(true)
 
@@ -170,12 +166,13 @@ end
 -- borrower side
 -- ---------------------------------------------------------------------------
 
--- Leader-side popups: when the loan's owner is NOT the raid leader, only the leader can perform
--- the role swaps, so their client prompts on each loan TRANSITION: loan appeared -> "lend master
--- loot to <borrower>", loan cleared -> "return master loot to <owner>". The owner swaps
--- automatically (StartMLLoan/EndMLLoan) and is never prompted. Transition-tracked by the encoded
--- loan string so re-applied snapshots with the same loan never re-prompt. Called from
--- RefreshLootAuthority, which runs on both snapshot apply and roster events.
+-- Loan-transition reactions on every client, called from RefreshLootAuthority (which runs on both
+-- snapshot apply and roster events). Transition-tracked by the encoded loan string so re-applied
+-- snapshots with the same loan never re-fire.
+--   * BORROWER, loan appeared: whisper LOANREADY back to the owner. This ack is the swap gate:
+--     it proves the authority pin is live on the borrower BEFORE the roster flips.
+--   * RAID LEADER (not the owner), loan appeared/cleared: popup to perform the role swap /
+--     restore (only the leader can SetLootMethod; the owner-is-leader case swaps automatically).
 function addon:MaybePromptLeaderLoanSwap()
     local loan = self:ActiveMLLoan()
     local cur = loan and self:EncodeMLLoan(loan) or nil
@@ -183,8 +180,14 @@ function addon:MaybePromptLeaderLoanSwap()
     local prevLoan = self._loanPrompted and self:DecodeMLLoan(self._loanPrompted) or nil
     self._loanPrompted = cur
 
-    if not StaticPopup_Show or not isSelfRaidLeader() then return end
     local me = util:NormalizeKey(util:GetPlayerName("player") or "")
+    if loan and me == util:NormalizeKey(loan.borrower) then
+        local _, link = util:ItemRender(loan.itemId)
+        self:SendLargeMessage("LOANREADY", { tostring(loan.itemId) }, "WHISPER", loan.owner, "ALERT")
+        self:Print("You are being lent master loot for " .. (link or "a quest drop") .. ". Loot it off the corpse once the role lands; it returns automatically.")
+    end
+
+    if not StaticPopup_Show or not isSelfRaidLeader() then return end
     if loan then
         if me == util:NormalizeKey(loan.owner) then return end
         local _, link = util:ItemRender(loan.itemId)
@@ -195,6 +198,28 @@ function addon:MaybePromptLeaderLoanSwap()
         StaticPopup_Hide("WEIRDLOOT_LOAN_SWAP")
         local dialog = StaticPopup_Show("WEIRDLOOT_LOAN_RESTORE", prevLoan.owner)
         if dialog then dialog.data = util:StripRealm(prevLoan.owner) end
+    end
+end
+
+-- Owner: the borrower's client confirmed it holds the loan (the pin is live). NOW the role swap
+-- is safe: perform it if we are the leader, and whisper the borrower their pickup instruction.
+function addon:OnLoanReadyMessage(sender, fields)
+    local loan = self:ActiveMLLoan()
+    if not loan or not self:IsAuthorizedLootMaster() then return end
+    if not self._loanAwaitingReady then return end
+    if util:NormalizeKey(sender or "") ~= util:NormalizeKey(loan.borrower) then return end
+    self._loanAwaitingReady = nil
+
+    local lot = self.lootCore and loan.lotId and self.lootCore:Get(loan.lotId)
+    local _, link = util:ItemRender((lot and lot.itemId) or loan.itemId)
+    local shown = link or "the quest drop"
+    if isSelfRaidLeader() then
+        if SetLootMethod then SetLootMethod("master", util:StripRealm(loan.borrower)) end
+        util:WhisperChat(loan.borrower, "You have been lent master loot: loot " .. shown .. " from the corpse now. The role returns automatically once you have it.")
+        self:Print(loan.borrower .. " confirmed the loan; master loot handed over.")
+    else
+        util:WhisperChat(loan.borrower, "You are getting master loot to pick up " .. shown .. ": loot it from the corpse as soon as the leader swaps you in.")
+        self:Print(loan.borrower .. " confirmed the loan; the raid leader can swap now (they are prompted).")
     end
 end
 

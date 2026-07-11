@@ -38,15 +38,8 @@ function addon:LootAlert(text)
     if PlaySound then PlaySound("RaidWarning") end
 end
 
--- Plain chat whisper (not addon comm), throttled when CTL is present; mirrors TradeDeliver's send.
 local function whisperChat(target, text)
-    local msg = "[WeirdLoot] " .. text
-    local ctl = ChatThrottleLib
-    if ctl then
-        ctl:SendChatMessage("ALERT", "WeirdLoot", msg, "WHISPER", nil, target)
-    else
-        SendChatMessage(msg, "WHISPER", nil, target)
-    end
+    util:WhisperChat(target, text)
 end
 
 -- ---------------------------------------------------------------------------

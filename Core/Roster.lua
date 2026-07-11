@@ -213,16 +213,82 @@ function addon:RefreshLootAuthority()
         lootMasterName = playerName
     end
 
-    -- ML LOAN pin: while an item-scoped loan is active (MLLoan.lua), the WoW roster names the
-    -- BORROWER as master looter, but the addon session must stay with the loan's OWNER: authority
-    -- and the displayed ML both pin to the owner. This is what keeps the borrower from assuming
-    -- the session (the false->true transition below never fires for them) and keeps every raider
-    -- from seeing an ML change at all. Older clients without the loan field degrade to following
-    -- the roster.
+    -- ------------------------------------------------------------------------------------------
+    -- ML LOAN authority handling (MLLoan.lua). Around a loan's role swaps, GetLootMethod readings
+    -- are UNRELIABLE: 3.3.5 can transiently report a master-looter index that maps to the WRONG
+    -- member mid-change (the Saelinen incident: a bystander's client read ITSELF as ML in the
+    -- restore window, assumed the session, and minted a divergent epoch that split the raid's
+    -- sync). Exactly one mechanism owns "who is the authority" at any moment, and every hand-off
+    -- between mechanisms is an observed EVENT, never a timer:
+    --   loan ACTIVE   -> the PIN: authority is loan.owner, full stop, on every client.
+    --   loan CLEARED  -> ROLE IN TRANSIT: keep answering loan.owner until the live roster actually
+    --                    names them (the restore landing = the disarm event; usually <1s).
+    --   settled       -> plain roster rules.
+    -- Timers appear only as dead-peer escape hatches, never as the decision rule.
+    -- ------------------------------------------------------------------------------------------
+    local numRaidNow = GetNumRaidMembers() or 0
+    local function nameInRaid(name)
+        local want = util:NormalizeKey(util:StripRealm(name or ""))
+        if want == "" then return false end
+        for i = 1, numRaidNow do
+            local n = GetRaidRosterInfo(i)
+            if n and util:NormalizeKey(util:StripRealm(n)) == want then return true end
+        end
+        return false
+    end
+
     local loan = self.ActiveMLLoan and self:ActiveMLLoan() or nil
+
+    -- OWNER-LEFT VOIDING: only the owner's client may END a loan, so a loan whose owner is gone
+    -- would pin an absent authority forever and fight any manual recovery. Each client observes
+    -- the departure locally (roster event) and voids its own copy. A post-login EMPTY roster is
+    -- not a departure: require a readable roster (numRaid > 0) to conclude anything.
+    if loan and numRaidNow > 0 and not nameInRaid(loan.owner) then
+        local gone = loan.owner
+        local session = self:GetCurrentSession()
+        session.mlLoan = nil
+        loan = nil
+        self:Print("Master-loot loan voided: its owner " .. gone .. " left the raid.")
+    end
+
+    -- THE PIN: while the loan is set, the roster's opinion does not matter on ANY client: the
+    -- borrower never assumes, a bystander's poisoned read is inert, and every raider keeps
+    -- showing the owner as ML. Older clients without the loan field degrade to the roster.
     if loan then
         lootMasterName = loan.owner
         isLootMaster = playerName ~= nil and util:NormalizeKey(loan.owner) == util:NormalizeKey(playerName)
+        self._loanRestorePending = nil   -- a live loan supersedes any earlier transit state
+    end
+
+    -- Arm ROLE IN TRANSIT on the clear transition, in the SAME resolve that first sees the loan
+    -- gone (arming any later would leave this very resolve unguarded against a poisoned read).
+    if not loan and self._lastLoanOwner then
+        self._loanRestorePending = { owner = self._lastLoanOwner, since = GetTime() }
+    end
+    self._lastLoanOwner = loan and loan.owner or nil
+
+    -- ROLE IN TRANSIT: the protocol says the only legitimate next authority after a loan is the
+    -- owner taking the role back. Until the live roster says exactly that, any other reading
+    -- ("I am ML", a surprise third name) is presumed to be the mid-shuffle transient: hold the
+    -- script's expectation and re-read. Disarm events: the owner confirmed by the roster, the
+    -- owner leaving the raid (manual recovery is then legitimate), or a new loan (pin resumes).
+    -- The deadline is a last-resort escape hatch for a roster that never updates, not the rule.
+    local pending = not loan and self._loanRestorePending or nil
+    if pending then
+        local RESTORE_DEADLINE = 60
+        local ownerKey = util:NormalizeKey(pending.owner or "")
+        local resolvedKey = lootMasterName and util:NormalizeKey(lootMasterName) or nil
+        if resolvedKey == ownerKey then
+            self._loanRestorePending = nil                       -- the expected event: disarm
+        elseif numRaidNow > 0 and not nameInRaid(pending.owner) then
+            self._loanRestorePending = nil                       -- owner gone: script is void
+        elseif GetTime() - (pending.since or 0) > RESTORE_DEADLINE then
+            self._loanRestorePending = nil                       -- dead-roster escape hatch
+        else
+            lootMasterName = pending.owner
+            isLootMaster = playerName ~= nil and ownerKey == util:NormalizeKey(playerName)
+            if self.ScheduleAuthorityRecheck then self:ScheduleAuthorityRecheck() end
+        end
     end
 
     -- "Roster unreadable": master loot is on with partyMasterIndex == 0 (the API flags US as ML), but
