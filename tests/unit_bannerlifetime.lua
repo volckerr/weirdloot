@@ -205,6 +205,42 @@ test("LC award card: candidate flyout fires the award callback, then clears on t
     check(not row.RerollButton:IsShown(), "reroll is hidden once the copy is awarded")
 end)
 
+test("phantom loan card: Cancel Loan fires without fading; the offer state returns on the same-key re-add", function()
+    local w = bannerWorld(true, function(opt)
+        opt.forceKeepResultPopup = true
+        opt.resultPopupAutoCloseEnabled = true
+        opt.resultPopupAutoCloseSeconds = 10
+    end)
+    local cancelled = false
+    local KEY = "L:loan1"
+    -- mid-loan shape: no offer flyout (no onAward), a live cancel callback
+    w.addon:AddLootBannerItem({
+        key = KEY, link = WON.link, icon = "x", quantity = 1, phantomDrop = true,
+        winners = { { name = "Gorgarg", class = "Warrior", roll = 77, section = "MS" } },
+        onReroll = function() end,
+        onLoanCancel = function() cancelled = true end,
+    })
+    local row
+    for _ = 1, 60 do F.pump(w, 0.001); row = firstWonRow(w); if row then break end end
+    check(row, "the loan card was shown")
+    check(row.LoanCancelButton:IsShown(), "Cancel Loan is shown while the loan runs")
+    check(not row.LCFlyout:IsShown(), "no loan-offer flyout mid-loan")
+    row.LoanCancelButton:GetScript("OnClick")(row.LoanCancelButton)
+    check(cancelled, "clicking Cancel Loan fired the callback")
+    check(row.alive and not row.fading, "the card did NOT fade: it reverts in place")
+
+    -- the callback re-shows the card under the same key, back in the offer state
+    w.addon:AddLootBannerItem({
+        key = KEY, link = WON.link, icon = "x", quantity = 1, phantomDrop = true, loanSend = true,
+        winners = { { name = "Gorgarg", class = "Warrior", roll = 77, section = "MS" } },
+        candidates = { { name = "Gorgarg", class = "Warrior", roll = 77, bracket = "MS" } },
+        onAward = function() end,
+        onReroll = function() end,
+    })
+    check(not row.LoanCancelButton:IsShown(), "Cancel Loan hidden once the loan ended")
+    check(row.LCFlyout:IsShown(), "the loan-offer flyout is back")
+end)
+
 test("reused slot resets the won-card button alpha (stale-fade translucency guard)", function()
     -- A pooled slot whose previous life faded leaves its close/reroll button at a partial alpha.
     -- Every other button gets a SetAlpha(1) on reuse; these two must too, or they render translucent.

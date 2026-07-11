@@ -2139,9 +2139,10 @@ end
 
 -- Show/refresh the ML's win card for a resolved INVISIBLE phantom lot (a quest-gated drop the ML
 -- cannot see). The pickup is an ML loan: while no loan is running, the flyout reads "Loan master
--- loot to" and clicking a name starts the loan to them; while the loan runs the flyout is gone
--- (cancel via /wl loan cancel) and the card holds the On Corpse tag until the borrower's LOANDONE
--- collapses it to a plain delivered card. ML only.
+-- loot to" and clicking a name starts the loan to them; while the loan runs the flyout is
+-- replaced by a Cancel Loan button (EndMLLoan: role returns, card reverts to the offer state) and
+-- the card holds the On Corpse tag until the borrower's LOANDONE collapses it to a plain
+-- delivered card. ML only.
 function addon:ShowPhantomLoanCard(lotId)
     local core = self.lootCore
     local lot = core:Get(lotId); if not lot then return end
@@ -2159,7 +2160,11 @@ function addon:ShowPhantomLoanCard(lotId)
     if pending then
         item.phantomDrop = true                     -- "Phantom Drop" side tag: the ML cannot see this item
         local loan = self:ActiveMLLoan()
-        if not (loan and loan.lotId == lotId) then
+        if loan and loan.lotId == lotId then
+            -- mid-loan reset: end the loan and take the role back without discarding the winner.
+            -- EndMLLoan re-shows this card (same key), so it reverts to the offer state in place.
+            item.onLoanCancel = function() self:EndMLLoan("cancelled") end
+        else
             item.loanSend = true
             -- Singular by design: the loan can only go to the WINNER (the pickup belongs to
             -- whoever the roll/council decided on, so there is nothing to choose). One row,

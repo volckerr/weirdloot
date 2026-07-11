@@ -1020,6 +1020,22 @@ local function buildBanner(bannerName, medallionCfg)
         end)
         frame.RerollButton:Hide()
 
+        -- Cancel Loan (phantom loan card, ML only): shown while an ML loan is running for this
+        -- lot. Ends the loan (role returns to the owner) WITHOUT discarding the winner: the
+        -- callback re-shows this card under the same key, so it reverts to the loan-offer state
+        -- in place -- no fade, unlike Reroll.
+        frame.LoanCancelButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+        frame.LoanCancelButton:SetText("Cancel Loan")
+        frame.LoanCancelButton:SetWidth(90)
+        frame.LoanCancelButton:SetHeight(18)
+        frame.LoanCancelButton:SetPoint("RIGHT", frame.RerollButton, "LEFT", -4, 0)
+        frame.LoanCancelButton:SetScript("OnClick", function()
+            local cb = frame.onLoanCancel
+            frame.LoanCancelButton:Hide()
+            if cb then cb() end
+        end)
+        frame.LoanCancelButton:Hide()
+
         -- LC award flyout (loot master only): a panel off the card's ML-controls side, populated in the
         -- won-card configure path (populateLCFlyout) with one clickable candidate row per roller/named.
         frame.LCFlyout = CreateFrame("Frame", nil, frame)
@@ -1493,6 +1509,9 @@ local function buildBanner(bannerName, medallionCfg)
         frame.onReroll = nil
         frame.RerollButton:SetAlpha(1)
         frame.RerollButton:Hide()       -- only a no-winner won card shows it
+        frame.onLoanCancel = nil
+        frame.LoanCancelButton:SetAlpha(1)
+        frame.LoanCancelButton:Hide()   -- only a mid-loan phantom card shows it
         frame.LCFlyout:Hide()           -- only a loot-council ML award card shows it (populated below)
         if data.rollDuration then
             -- roll-prompt row: a countdown of the roll timer + clickable bracket buttons. The live
@@ -1558,6 +1577,8 @@ local function buildBanner(bannerName, medallionCfg)
         if frame.closeImmediate then frame.CloseButton:Show() end   -- ML: no wait
         frame.onReroll = data.onReroll
         if data.onReroll then frame.RerollButton:Show() end   -- "no one rolled" ML card / LC award card
+        frame.onLoanCancel = data.onLoanCancel
+        if data.onLoanCancel then frame.LoanCancelButton:Show() end   -- mid-loan phantom card
         populateLCFlyout(frame, data)                         -- LC award flyout (ML only); hides itself otherwise
         positionOnCorpseTag(frame, data)                      -- after the flyout: the send card's tag hangs under it
         if additional then
@@ -1889,6 +1910,7 @@ local function buildBanner(bannerName, medallionCfg)
             copiesRemaining = item.copiesRemaining, -- LC award card (ML): copies still to assign
             awarded = item.awarded,         -- LC award card (ML): winners assigned so far
             onReroll = item.onReroll,   -- won card only: ML reroll callback; present = show the Reroll button
+            onLoanCancel = item.onLoanCancel, -- phantom loan card (ML): mid-loan cancel; present = show Cancel Loan
             rollRemaining = item.rollRemaining, -- static seconds-left (demo/plain data; ignored with a thunk)
             getTimeLeft = item.getTimeLeft, -- live feed: per-tick seconds left from the roll's own deadline
             key = item.key,             -- roll card only: lets the live feed close/update the card by id
@@ -1938,6 +1960,8 @@ local function buildBanner(bannerName, medallionCfg)
                             BossBanner_ConfigureLootFrame(f, data)
                             f.onReroll = data.onReroll
                             if data.onReroll then f.RerollButton:Show() else f.RerollButton:Hide() end
+                            f.onLoanCancel = data.onLoanCancel
+                            if data.onLoanCancel then f.LoanCancelButton:Show() else f.LoanCancelButton:Hide() end
                             populateLCFlyout(f, data)
                             positionOnCorpseTag(f, data)   -- delivered: the tag clears with the send state
                         end

@@ -91,6 +91,16 @@ function addon:BuildMasterTab()
         addon:UnlockAllSessionRolls()
     end)
 
+    -- ML-loan reset: same action as the loan card's Cancel Loan / "/wl loan cancel". Ends the
+    -- running loan and returns the WoW role to the owner; the winner and the pending offer
+    -- survive, so the loan can be restarted from the card. Enabled only while a loan is active.
+    local loanCancelButton = createButton(panel, "Cancel ML Loan", 120, 24)
+    loanCancelButton:SetPoint("LEFT", unlockButton, "RIGHT", 8, 0)
+    loanCancelButton:SetScript("OnClick", function()
+        if addon:ActiveMLLoan() then addon:EndMLLoan("cancelled") end
+        addon:RefreshMasterTab()
+    end)
+
     -- Section 3: Import/Export Controls. Exports are open to everyone (raiders render results from
     -- the synced ledger); the import/broadcast buttons stay ML-gated by the refresh below.
     local ioHeader, ioDivider = makeSectionHeader("Import/Export Controls", startButton, "BOTTOMLEFT", -16)
@@ -140,6 +150,12 @@ function addon:BuildMasterTab()
     panel.broadcastNamedItemsButton = broadcastNamedItemsButton
     panel.payoutButton = payoutButton
     panel.allowTradesButton = allowTradesButton
+    panel.loanCancelButton = loanCancelButton
+
+    setButtonTooltip(loanCancelButton, "Cancel ML Loan",
+        "Ends the running master-loot loan and returns the loot-master role to you (or prompts the "
+        .. "raid leader to). The winner is kept: the loan can be restarted from the item's win card. "
+        .. "Use this to reset a loan that went wrong instead of swapping loot master by hand.")
 
     setButtonTooltip(allowTradesButton, "Incoming Trades (Toggle)",
         "Controls trades OTHERS open with you. When ON (default), incoming trades open normally. When "
@@ -243,6 +259,17 @@ function addon:RefreshMasterTab()
         end
     end
 
+    -- Only the loan's owner can end it (EndMLLoan is owner-gated; the pin keeps the owner
+    -- authorized mid-loan), so authority + an active loan is exactly the enabled condition.
+    local loan = self:ActiveMLLoan()
+    if panel.loanCancelButton then
+        if authorized and loan then
+            panel.loanCancelButton:Enable()
+        else
+            panel.loanCancelButton:Disable()
+        end
+    end
+
     local payoutActive = self.payout and self.payout:IsPayoutActive()
     panel.payoutButton:SetText(payoutActive and "Payout Mode: ON" or "Payout Mode: OFF")
 
@@ -273,12 +300,19 @@ function addon:RefreshMasterTab()
         "Broadcast Named Items: Sends your current named-item list to the raid once so each raider's addon saves and uses the latest version.",
     }, "\n"))
 
-    panel.snapshot:SetText(string.format(
+    local snapshotText = string.format(
         "Config revision: %d\nRaid attendees: %d\nSession items: %d\nLocked items: %d\nProcessed results: %d",
         self.config.revision or 0,
         attendeeCount,
         itemCount,
         lockedCount,
         resultCount
-    ))
+    )
+    if loan then
+        local _, link = util:ItemRender(loan.itemId)
+        snapshotText = snapshotText .. string.format(
+            "\n|cffffd200ML loan active:|r %s holds the loot-master role for %s (owner: %s).",
+            loan.borrower, link or ("item " .. tostring(loan.itemId)), loan.owner)
+    end
+    panel.snapshot:SetText(snapshotText)
 end
