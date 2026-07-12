@@ -23,6 +23,19 @@ setfenv(chunk, env)
 chunk("WeirdLoot", {})
 local addon = env.WeirdLoot
 
+H.test("debug command: the banner verb runs the demo (a debug surface, not a root slash command)", function()
+    -- string.trim ships from Core/Util.lua (not loaded in this standalone suite); match its behavior
+    if not string.trim then function string.trim(s) return (tostring(s):gsub("^%s*(.-)%s*$", "%1")) end end
+    addon.Print = addon.Print or function() end
+    local ran = 0
+    addon.RunBannerDemo = function() ran = ran + 1 end
+    addon:HandleDebugCommand("banner")
+    H.eq(ran, 1, "banner verb dispatched to the demo")
+    addon.RunBannerDemo = nil
+    addon:HandleDebugCommand("banner")   -- banner UI not loaded: message, no error
+    H.eq(ran, 1, "no demo without the banner UI loaded")
+end)
+
 H.test("ClassifySyncAnomaly flags real sync faults", function()
     H.notNil(addon:ClassifySyncAnomaly("give-up", { kind = "request", reason = "max" }), "recovery give-up")
     H.notNil(addon:ClassifySyncAnomaly("drop-foreign", { t = "H", from = "ML" }), "foreign-dropped inbound")
