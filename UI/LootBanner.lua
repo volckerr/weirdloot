@@ -269,34 +269,59 @@ end
 
 -- Fill and show the loot master's LC award flyout: header ("Award copy k of N"), one clickable row per
 -- candidate (class-colored name, roll or "-", bracket), anchored off the card's ML-controls side so it
--- tracks the same left/right setting the End/Cancel rail uses. Hidden (returns false) for a raider card
--- or a plain win card, which carry no candidates/onAward.
+-- tracks the same left/right setting the End/Cancel rail uses. While an ML loan RUNS the same panel
+-- swaps to the loan state: a "Master loot lent out" header and a single Cancel row (ends the loan and
+-- keeps the winner; the same-key re-add flips the panel back to the offer). Hidden (returns false)
+-- for a raider card or a plain win card, which carry none of the callbacks.
 local function populateLCFlyout(frame, data)
     local cands = data.candidates
-    if not (data.lootCouncil and data.onAward and cands and #cands > 0) then
+    local offer = (data.lootCouncil or data.corpseSend or data.loanSend) and data.onAward and cands and #cands > 0
+    if not offer and not data.onLoanCancel then
         frame.LCFlyout:Hide()
         return false
     end
-    local total = data.copiesTotal or 1
-    local remaining = data.copiesRemaining or total
-    local nextCopy = math.min(total - remaining + 1, total)
-    frame.LCFlyoutHeader:SetText(total > 1
-        and ("|cffffd200Award copy " .. nextCopy .. " of " .. total .. "|r")
-        or "|cffffd200Award to|r")
 
     local shown = 0
-    for i, c in ipairs(cands) do
-        local row = lcFlyoutRow(frame, i)
-        local y = -20 - (i - 1) * FLYOUT_ROW_H
+    if data.onLoanCancel then
+        frame.LCFlyoutHeader:SetText("|cffffd200Master loot lent out|r")
+        local row = lcFlyoutRow(frame, 1)
         row:ClearAllPoints()
-        row:SetPoint("TOPLEFT", frame.LCFlyout, "TOPLEFT", 5, y)
-        row:SetPoint("TOPRIGHT", frame.LCFlyout, "TOPRIGHT", -5, y)
-        local rollText = c.roll and tostring(c.roll) or "-"
-        row.text:SetText(colorName(c.name, c.class) .. "  |cffbbbbbb" .. rollText .. "|r  |cffffd200" .. (c.bracket or "") .. "|r")
-        row.awardName = c.name
-        row:SetScript("OnClick", function() if data.onAward then data.onAward(row.awardName) end end)
+        row:SetPoint("TOPLEFT", frame.LCFlyout, "TOPLEFT", 5, -20)
+        row:SetPoint("TOPRIGHT", frame.LCFlyout, "TOPRIGHT", -5, -20)
+        row.text:SetText("|cffff6060Cancel loan|r")
+        row.awardName = nil
+        row:SetScript("OnClick", function() if data.onLoanCancel then data.onLoanCancel() end end)
         row:Show()
-        shown = i
+        shown = 1
+    else
+        local total = data.copiesTotal or 1
+        local remaining = data.copiesRemaining or total
+        local nextCopy = math.min(total - remaining + 1, total)
+        if data.loanSend then
+            -- invisible phantom: rows lend the WoW ML role so the picked player collects the drop
+            frame.LCFlyoutHeader:SetText("|cffffd200Loan master loot to|r")
+        elseif data.corpseSend then
+            -- phantom send card: rows retarget the pending master-loot send, not an LC award
+            frame.LCFlyoutHeader:SetText("|cffffd200Send from corpse to|r")
+        else
+            frame.LCFlyoutHeader:SetText(total > 1
+                and ("|cffffd200Award copy " .. nextCopy .. " of " .. total .. "|r")
+                or "|cffffd200Award to|r")
+        end
+
+        for i, c in ipairs(cands) do
+            local row = lcFlyoutRow(frame, i)
+            local y = -20 - (i - 1) * FLYOUT_ROW_H
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", frame.LCFlyout, "TOPLEFT", 5, y)
+            row:SetPoint("TOPRIGHT", frame.LCFlyout, "TOPRIGHT", -5, y)
+            local rollText = c.roll and tostring(c.roll) or "-"
+            row.text:SetText(colorName(c.name, c.class) .. "  |cffbbbbbb" .. rollText .. "|r  |cffffd200" .. (c.bracket or "") .. "|r")
+            row.awardName = c.name
+            row:SetScript("OnClick", function() if data.onAward then data.onAward(row.awardName) end end)
+            row:Show()
+            shown = i
+        end
     end
     for i = shown + 1, #frame.LCRows do frame.LCRows[i]:Hide() end
     frame.LCFlyout:SetHeight(24 + shown * FLYOUT_ROW_H)
@@ -314,6 +339,33 @@ end
 -- listed priority shows the default bracket order, same as the roll popup did
 local function rollPrioText(prio)
     return "|cffffffffPrio:|r " .. ((prio and prio ~= "") and prio or addon.DEFAULT_PRIO)
+end
+
+-- Phantom side tag: the ML's card carries a tag NEXT TO it on the ML-controls side (outside the
+-- End/Cancel rail on a roll card; under the send/loan flyout on a win card) so the banner can
+-- never read as "every drop is in my bags". Two variants: "On Corpse" (a copy the ML can see but
+-- not pick up) and "Quest Drop" (an invisible quest-gated drop the ML's loot view filtered out
+-- entirely; do not look for it in the window or bags). Hidden on any card without a flag (rows
+-- are pooled, so this runs on every configure).
+local function positionOnCorpseTag(frame, data)
+    local tag = frame.OnCorpseTag
+    if not tag then return end
+    if not (data.onCorpse or data.corpseSend or data.phantomDrop) then tag:Hide(); return end
+    tag:SetText(data.phantomDrop and "|cffff6060Quest Drop|r" or "|cffff6060On Corpse|r")
+    tag:ClearAllPoints()
+    local left = bannerMLSide() == "LEFT"
+    if data.rollDuration and (data.onMLEnd or data.onMLCancel) and frame.MLButtons[1] then
+        local rail = frame.MLButtons[1]
+        if left then tag:SetPoint("RIGHT", rail, "LEFT", -6, 0)
+        else tag:SetPoint("LEFT", rail, "RIGHT", 6, 0) end
+    elseif frame.LCFlyout:IsShown() then
+        tag:SetPoint("TOP", frame.LCFlyout, "BOTTOM", 0, -4)
+    elseif left then
+        tag:SetPoint("RIGHT", frame, "LEFT", -6, 0)
+    else
+        tag:SetPoint("LEFT", frame, "RIGHT", 6, 0)
+    end
+    tag:Show()
 end
 
 -- Apply a roll card's bracket-button availability (data.disabled: label -> reason string / true =
@@ -510,6 +562,17 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
         lootFrame.Badge:Hide()
         lootFrame.Background2:Hide()
         lootFrame:SetBackdropBorderColor(0, 0, 0, 0)   -- hidden in full mode (SetItemButtonQuality shows the icon frame)
+    end
+
+    -- Minimal cards have no dark chrome behind the text, so the quality-colored item name gets an
+    -- outline to hold contrast against any world background (full mode's art supplies its own).
+    -- The font's stock 1,-1 shadow comes OFF with the outline: stacked they render heavier than
+    -- the outline alone (the client has no thinner outline weight than OUTLINE).
+    -- Per-configure like the rest of this block: pooled rows restyle when the mode toggles.
+    local nameFont, nameSize = lootFrame.ItemName:GetFont()
+    if type(nameFont) == "string" then
+        lootFrame.ItemName:SetFont(nameFont, nameSize, minimal and "OUTLINE" or "")
+        lootFrame.ItemName:SetShadowOffset(minimal and 0 or 1, minimal and 0 or -1)
     end
 end
 
@@ -889,6 +952,11 @@ local function buildBanner(bannerName, medallionCfg)
         PlayerName:SetJustifyH("LEFT")
         PlayerName:SetSize(204, 0)
         PlayerName:SetPoint("TOPLEFT", ItemName, "BOTTOMLEFT", 0, 0)
+
+        -- phantom side tag ("On Corpse" / "Quest Drop"); text + anchor set per card type in
+        -- positionOnCorpseTag
+        frame.OnCorpseTag = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        frame.OnCorpseTag:Hide()
 
         frame.IconHitBox = CreateFrame("Frame", nil, frame)
         local IconHitBox = frame.IconHitBox
@@ -1453,7 +1521,7 @@ local function buildBanner(bannerName, medallionCfg)
         frame.onReroll = nil
         frame.RerollButton:SetAlpha(1)
         frame.RerollButton:Hide()       -- only a no-winner won card shows it
-        frame.LCFlyout:Hide()           -- only a loot-council ML award card shows it (populated below)
+        frame.LCFlyout:Hide()           -- only an ML award/offer/loan card shows it (populated below)
         if data.rollDuration then
             -- roll-prompt row: a countdown of the roll timer + clickable bracket buttons. The live
             -- feed passes getTimeLeft (the roll's own deadline is the clock; self-correcting and
@@ -1483,6 +1551,7 @@ local function buildBanner(bannerName, medallionCfg)
             else
                 for _, btn in ipairs(frame.MLButtons) do btn:Hide() end
             end
+            positionOnCorpseTag(frame, data)
             local b1 = frame.RollButtons[1]
             rbDbg(("add-DROP idx=%s reused=%s b_own=%.2f b_eff=%.2f f_own=%.2f f_eff=%.2f"):format(
                 tostring(frame.__idx), tostring(reused), b1:GetAlpha(), b1:GetEffectiveAlpha(),
@@ -1517,7 +1586,8 @@ local function buildBanner(bannerName, medallionCfg)
         if frame.closeImmediate then frame.CloseButton:Show() end   -- ML: no wait
         frame.onReroll = data.onReroll
         if data.onReroll then frame.RerollButton:Show() end   -- "no one rolled" ML card / LC award card
-        populateLCFlyout(frame, data)                         -- LC award flyout (ML only); hides itself otherwise
+        populateLCFlyout(frame, data)                         -- ML award/offer/loan flyout; hides itself otherwise
+        positionOnCorpseTag(frame, data)                      -- after the flyout: the send card's tag hangs under it
         if additional then
             for _, f in ipairs(self.LootFrames) do
                 if f.alive and f ~= frame and not f.rollDuration then
@@ -1837,12 +1907,17 @@ local function buildBanner(bannerName, medallionCfg)
             winners = item.winners, rolls = item.rolls, prompt = item.prompt, rollDuration = item.rollDuration,
             noWinner = item.noWinner,   -- won card only: nobody rolled -> "No one rolled" line + reroll
             lootCouncil = item.lootCouncil, -- won card only: LC item -> "Loot Council" line + roll breakdown
-            candidates = item.candidates,   -- LC award card (ML): flyout rows { name, class, roll, bracket }
-            onAward = item.onAward,         -- LC award card (ML): fired with the picked name -> award next copy
+            corpseSend = item.corpseSend,   -- won card (ML): phantom copy on the corpse awaiting master-loot send
+            loanSend = item.loanSend,       -- won card (ML): invisible phantom; flyout starts an ML loan instead
+            onCorpse = item.onCorpse,       -- roll card (ML): phantom copy still on the corpse while it rolls
+            phantomDrop = item.phantomDrop, -- roll/won card (ML): INVISIBLE phantom (drop the ML can't see)
+            candidates = item.candidates,   -- LC/send flyout rows { name, class, roll, bracket }
+            onAward = item.onAward,         -- LC: award next copy; send card: retarget the pending send
             copiesTotal = item.copiesTotal, -- LC award card (ML): total copies (multi-copy header)
             copiesRemaining = item.copiesRemaining, -- LC award card (ML): copies still to assign
             awarded = item.awarded,         -- LC award card (ML): winners assigned so far
             onReroll = item.onReroll,   -- won card only: ML reroll callback; present = show the Reroll button
+            onLoanCancel = item.onLoanCancel, -- phantom loan card (ML): mid-loan; the flyout shows Cancel instead of the offer
             rollRemaining = item.rollRemaining, -- static seconds-left (demo/plain data; ignored with a thunk)
             getTimeLeft = item.getTimeLeft, -- live feed: per-tick seconds left from the roll's own deadline
             key = item.key,             -- roll card only: lets the live feed close/update the card by id
@@ -1869,6 +1944,7 @@ local function buildBanner(bannerName, medallionCfg)
                         if f.alive and not f.fading and f.rowKey == item.key and f.rollDuration then
                             f.rollDuration = data.rollDuration   -- bar denominator
                             f.PlayerName:SetText(rollPrioText(data.prio))
+                            positionOnCorpseTag(f, data)
                             -- recompute bracket availability from the authoritative feed: a card first
                             -- shown from a restore's guessed (empty) prio had BiS wrongly gated; the DROP
                             -- carries the real prio, so re-apply the disabled map + preselected pick here
@@ -1892,6 +1968,7 @@ local function buildBanner(bannerName, medallionCfg)
                             f.onReroll = data.onReroll
                             if data.onReroll then f.RerollButton:Show() else f.RerollButton:Hide() end
                             populateLCFlyout(f, data)
+                            positionOnCorpseTag(f, data)   -- delivered: the tag clears with the send state
                         end
                     end
                 end
@@ -2054,6 +2131,28 @@ rollsLeftBanner.text:SetTextColor(POOR.r, POOR.g, POOR.b)
 rollsLeftBanner:Hide()               -- shown by RefreshRollsLeftBanner when the count is above zero
 dropsBanner.rollsLeftStrip = rollsLeftBanner
 
+-- "Items still on corpse" header (ML only): one strip ABOVE the drops banner, shown while ANY
+-- phantom copy is still physically on a corpse (roll running or send pending), regardless of how
+-- many. The per-card "On Corpse" tag marks WHICH cards; this header is the can't-miss instruction
+-- that the corpse still needs re-looting. Anchored outside the row layout so it never affects
+-- RelayoutRows; parented to the drops banner so it shows and hides with the roll stack.
+local onCorpseBanner = CreateFrame("Frame", "WeirdLootOnCorpseBanner", dropsBanner)
+onCorpseBanner:SetSize(269, ROLLS_LEFT_H)
+onCorpseBanner:SetBackdrop({
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 12,
+    insets = { left = 3, right = 3, top = 3, bottom = 3 },
+})
+onCorpseBanner:SetBackdropColor(0.12, 0.03, 0.03, 0.9)
+onCorpseBanner:SetBackdropBorderColor(1, 0.35, 0.35, 1)
+onCorpseBanner.text = onCorpseBanner:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+onCorpseBanner.text:SetPoint("CENTER", onCorpseBanner, "CENTER", 0, 0)
+onCorpseBanner.text:SetTextColor(1, 0.45, 0.45)
+onCorpseBanner.text:SetText("Item on corpse, re-loot once rolls complete.")
+onCorpseBanner:SetPoint("BOTTOM", dropsBanner, "TOP", 0, 4)
+onCorpseBanner:Hide()                -- shown by RefreshRollsLeftBanner while corpse loot is outstanding
+dropsBanner.onCorpseStrip = onCorpseBanner
+
 local function layoutRegion()
     restoreRegionPosition()
     dropsBanner:ClearAllPoints()
@@ -2085,6 +2184,17 @@ function addon:RefreshRollsLeftBanner()
         rollsLeftBanner:Show()
     else
         rollsLeftBanner:Hide()
+    end
+    if self.HasCorpseLootOutstanding and self:HasCorpseLootOutstanding() then
+        -- The chrome is flair, not used space: in full mode the frame's top ~44px is empty
+        -- animation slack (the gold art hangs at TOP -44, rows at -84), so seat the strip down
+        -- into that band, just above the visible art. In minimal mode the frame edge IS the
+        -- visible edge. Re-anchored each refresh because the minimalist toggle can change live.
+        onCorpseBanner:ClearAllPoints()
+        onCorpseBanner:SetPoint("BOTTOM", dropsBanner, "TOP", 0, bannerMinimal() and 4 or -40)
+        onCorpseBanner:Show()
+    else
+        onCorpseBanner:Hide()
     end
     if dropsBanner.RelayoutRows then dropsBanner:RelayoutRows() end
     layoutRegion()

@@ -170,6 +170,26 @@ function addon:InitializeSession()
     -- NOT a live mirror: clear the runtime flag so a takeover never rebroadcasts stale leftover loot.
     self:ObserveEpoch(self.session.id)
     self._mirrorActive = false
+    -- A disk-restored MIRROR of a loan (owner is someone else) is scrubbed: re-asserting it would
+    -- pin the session to an authority this client can never release. A restored loan of OUR OWN is
+    -- the opposite case: we are the one client that CAN release it (EndMLLoan is owner-gated), and
+    -- the raid's live mirrors still pin authority to us, so scrubbing silently would strand the
+    -- session (we would read "no loan, borrower is ML" and go quiet while everyone else waits on
+    -- us). Keep it and flag it; RefreshLootAuthority ends it through the normal owner-gated path
+    -- once the raid roster is readable. The trigger is only our own SavedVariables naming us as
+    -- the owner: GetLootMethod/roster reads (unreliable at login) never feed it.
+    local restoredLoan = self.session.mlLoan
+    local playerName = util:GetPlayerName("player")
+    if restoredLoan and restoredLoan.owner and playerName
+        and util:NormalizeKey(restoredLoan.owner) == util:NormalizeKey(playerName) then
+        self._endRestoredLoan = true
+        self:LogCoreEvent("loan-restore-keep", { borrower = restoredLoan.borrower })
+    else
+        if restoredLoan then
+            self:LogCoreEvent("loan-restore-scrub", { owner = restoredLoan.owner })
+        end
+        self.session.mlLoan = nil
+    end
 
     -- self.session is the persisted record, so it must not carry the loot projection: that would
     -- write loot state to disk a second time, beside the authoritative ledger. Keep it absent.
@@ -222,6 +242,7 @@ function addon:RebuildLootProjections()
             icon = icon,
             quantity = core:LiveCount(lot.id),
             state = lot.state,
+            phantom = lot.phantom or nil,       -- copy on a corpse, not in the ML's bags
             responses = lot.responses,          -- playerKey -> tier string
             locked = lot.state == core.STATE.RESOLVED,
         }

@@ -678,8 +678,8 @@ end
 
 -- Single source of truth for which roll brackets (BiS/MS/MU/OS/TM/Pass) an item offers, so the roll
 -- popup and the loot tab (mirrors of each other) never drift. They differ only in how they render the
--- result. Returns a map bracket -> disable reason ("locked" / "quest" / "unique" / "type" / "class" /
--- "noprio") or nil when the bracket is available. blockReason: a self-only reason the local player
+-- result. Returns a map bracket -> disable reason ("locked" / "quest" / "unique" / "mount" / "type" /
+-- "class" / "noprio") or nil when the bracket is available. blockReason: a self-only reason the local player
 -- can't use this drop at all (already did the quest / already hold the unique), so only Pass is
 -- allowed. Self-only, like the class block; the ML cannot see others' bags. hasPrio: whether the item
 -- has a listed priority (see addon:ItemHasPriority); BiS is offered only for such items.
@@ -709,4 +709,16 @@ function util:RollTierAvailability(item, isAllowed, isLocked, blockReason, hasPr
         out[key] = reason
     end
     return out
+end
+
+-- Plain chat whisper (not addon comm), throttled through CTL when present. The bracketed addon
+-- name tells the recipient a bot sent it.
+function util:WhisperChat(target, text)
+    local msg = "[WeirdLoot] " .. text
+    local ctl = ChatThrottleLib
+    if ctl then
+        ctl:SendChatMessage("ALERT", "WeirdLoot", msg, "WHISPER", nil, target)
+    else
+        SendChatMessage(msg, "WHISPER", nil, target)
+    end
 end

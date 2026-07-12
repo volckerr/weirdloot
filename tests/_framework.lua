@@ -149,6 +149,11 @@ function self.makeWorld(playerName, isML)
                 -- record the last set alpha (on __alpha) so reuse/reset tests can assert it, while
                 -- GetAlpha above still returns 1 for layout math.
                 return function(s, a) s.__alpha = a; return s end
+            elseif k == "SetText" then
+                -- record fontstring text (on __text) so card-line tests can assert what a row says
+                return function(s, t) s.__text = t; return s end
+            elseif k == "GetText" then
+                return function(s) return s.__text end
             elseif k == "Show" then
                 return function(s) s.__shown = true; return s end
             elseif k == "Hide" then
@@ -167,6 +172,11 @@ function self.makeWorld(playerName, isML)
                 return function(s) s.__disabled = true; return s end
             elseif k == "IsEnabled" then
                 return function(s) return not s.__disabled end
+            elseif k == "CreateFontString" or k == "CreateTexture" then
+                -- children must be DISTINCT objects: a fontstring records its own __text (SetText
+                -- above); the chainable-self fallback would make every sibling share one __text,
+                -- letting any SetText("") clobber the line a test wants to read
+                return function() return newFrame() end
             end
             -- WoW frame methods are CamelCase; the addon's data fields are lowercase. Return a
             -- chainable no-op for methods, but nil for an UNSET data field (e.g. frame.elapsed),
@@ -203,6 +213,7 @@ function self.makeWorld(playerName, isML)
                 lines = { "ItemName" }
                 if cur and cur.bound then lines[#lines + 1] = env.ITEM_SOULBOUND end
                 if cur and cur.win   then lines[#lines + 1] = string.format(env.BIND_TRADE_TIME_REMAINING, cur.win .. " sec") end
+                if cur and cur.known then lines[#lines + 1] = env.ITEM_SPELL_KNOWN end
             end
             tip.__lines = lines
             for i = 1, 32 do
@@ -211,14 +222,21 @@ function self.makeWorld(playerName, isML)
         end
         tip.ClearLines = function() end
         tip.SetBagItem = function(_, bag, slot) cur = env.__bags[bag] and env.__bags[bag][slot]; rebuild() end
-        tip.SetHyperlink = function() cur = nil; rebuild() end
+        -- by-id tooltip: renders the "Already known" line for ids flagged in env.__knownItems
+        -- (learned mounts; the real client stamps ITEM_SPELL_KNOWN on their tooltips)
+        tip.SetHyperlink = function(_, link)
+            local id = tonumber(string.match(tostring(link or ""), "item:(%d+)"))
+            cur = (id and env.__knownItems[id]) and { known = true } or nil
+            rebuild()
+        end
         tip.NumLines = function() return tip.__lines and #tip.__lines or 0 end
         rebuild()
         return tip
     end
 
     -- ---- WoW API stubs ----
-    local SCAN_TIP_NAMES = { TradeDeliverScanTip = true, WeirdLootScanTooltip = true }
+    local SCAN_TIP_NAMES = { TradeDeliverScanTip = true, WeirdLootScanTooltip = true, WeirdLootScanTip = true }
+    env.__knownItems = {}                            -- [itemId] = true: tooltip carries "Already known"
     env.CreateFrame = function(_, name, parent)
         local f = SCAN_TIP_NAMES[name] and newScanTip(name) or newFrame()
         if name then env[name] = f; f.__name = name end
@@ -273,6 +291,7 @@ function self.makeWorld(playerName, isML)
     env.ChatThrottleLib = { SendChatMessage = function() end }
     env.ITEM_QUALITY_COLORS = { [4] = { hex = "|cffa335ee" } }
     env.ITEM_SOULBOUND = "Soulbound"
+    env.ITEM_SPELL_KNOWN = "Already known"
     env.ITEM_BIND_ON_EQUIP = "Binds when equipped"
     env.ERR_TRADE_COMPLETE = "Trade complete."
     -- This client emits the unique-count pair backwards: the GIVER (the ML running the addon) sees
@@ -292,12 +311,38 @@ function self.makeWorld(playerName, isML)
         if not it then return nil end
         return "Item" .. it.id, "Interface\\Icons\\inv_test", it.count or 1
     end
+    env.__itemTypes = {}                             -- [itemId] = { class, subclass }; default Armor/Cloth
     env.GetItemInfo = function(idOrLink)
         local id = tonumber(idOrLink) or tonumber(string.match(tostring(idOrLink), "item:(%d+)"))
         if not id then return nil end
         local name = self.ITEMS[id] or ("Item" .. id)
+        local t = env.__itemTypes[id]
         -- name, link, quality, ilvl, reqLevel, class, subclass, stack, equipLoc, texture, sell
-        return name, self.linkFor(id), 4, 200, 80, "Armor", "Cloth", 1, "INVTYPE_SHOULDER", "Interface\\Icons\\inv_test", 0
+        return name, self.linkFor(id), 4, 200, 80, t and t[1] or "Armor", t and t[2] or "Cloth", 1, "INVTYPE_SHOULDER", "Interface\\Icons\\inv_test", 0
+    end
+    -- GetItemCount mirrors the 3.3.5a client (in-game verified): bags + equipped gear/bags +
+    -- keyring always; includeBank=true adds the bank. __bank is GetItemCount-only, matching the
+    -- real client where bank contents are not reachable through the container APIs remotely.
+    env.__bank = {}                                  -- [itemId] = count
+    env.GetItemCount = function(idOrLink, includeBank)
+        local id = tonumber(idOrLink) or tonumber(string.match(tostring(idOrLink), "item:(%d+)"))
+        if not id then return 0 end
+        local n = 0
+        for b = 0, 4 do
+            local B = env.__bags[b]
+            for s = 1, (B and B.size or 0) do
+                local it = B and B[s]
+                if it and it.id == id then n = n + (it.count or 1) end
+            end
+        end
+        for _, invId in pairs(env.__equipped) do
+            if invId == id then n = n + 1 end
+        end
+        for _, keyId in pairs(env.__keyring) do
+            if keyId == id then n = n + 1 end
+        end
+        if includeBank then n = n + (env.__bank[id] or 0) end
+        return n
     end
     -- ---- bag + trade-window model (drives the real TradeDeliver engine) ----
     env.__bags = {}                                  -- [bag] = { size=N, [slot]={id,count,link} }
@@ -508,6 +553,7 @@ self.ADDON_FILES = {
     "Data/BlacklistPresets/Paladin.lua", "Data/BlacklistPresets/Warlock.lua",
     "Data/ItemInfo.lua", "Data/LootPrios.lua",
     "Loot/LootCore.lua", "Loot/Resolver.lua", "Loot/Session.lua", "Loot/LiveRoll.lua", "Loot/AutoLoot.lua",
+    "Loot/LootObserver.lua", "Loot/MLLoan.lua",
     "Trade/TradeDeliver.lua", "Trade/Payout.lua",
     "UI/Popups.lua",
 }

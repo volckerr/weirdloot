@@ -205,6 +205,47 @@ test("LC award card: candidate flyout fires the award callback, then clears on t
     check(not row.RerollButton:IsShown(), "reroll is hidden once the copy is awarded")
 end)
 
+test("phantom loan card: the flyout swaps to Cancel loan mid-loan, no fade, and back to the offer on re-add", function()
+    local w = bannerWorld(true, function(opt)
+        opt.forceKeepResultPopup = true
+        opt.resultPopupAutoCloseEnabled = true
+        opt.resultPopupAutoCloseSeconds = 10
+    end)
+    local cancelled = false
+    local KEY = "L:loan1"
+    -- mid-loan shape: no offer (no onAward/candidates), a live cancel callback
+    w.addon:AddLootBannerItem({
+        key = KEY, link = WON.link, icon = "x", quantity = 1, phantomDrop = true,
+        winners = { { name = "Gorgarg", class = "Warrior", roll = 77, section = "MS" } },
+        onReroll = function() end,
+        onLoanCancel = function() cancelled = true end,
+    })
+    local row
+    for _ = 1, 60 do F.pump(w, 0.001); row = firstWonRow(w); if row then break end end
+    check(row, "the loan card was shown")
+    check(row.LCFlyout:IsShown(), "the flyout panel is shown mid-loan (same spot as the offer)")
+    check((row.LCFlyoutHeader.__text or ""):find("lent out", 1, true) ~= nil, "header says the role is lent out")
+    local r1 = row.LCRows[1]
+    check(r1 and r1:IsShown(), "one flyout row")
+    check((r1.text.__text or ""):find("Cancel loan", 1, true) ~= nil, "and it is the cancel action")
+    check(not (row.LCRows[2] and row.LCRows[2]:IsShown()), "no other rows mid-loan")
+    r1:GetScript("OnClick")(r1)
+    check(cancelled, "clicking the cancel row fired the callback")
+    check(row.alive and not row.fading, "the card did NOT fade: it reverts in place")
+
+    -- the callback re-shows the card under the same key, back in the offer state
+    w.addon:AddLootBannerItem({
+        key = KEY, link = WON.link, icon = "x", quantity = 1, phantomDrop = true, loanSend = true,
+        winners = { { name = "Gorgarg", class = "Warrior", roll = 77, section = "MS" } },
+        candidates = { { name = "Gorgarg", class = "Warrior", roll = 77, bracket = "MS" } },
+        onAward = function() end,
+        onReroll = function() end,
+    })
+    check(row.LCFlyout:IsShown(), "the flyout is still up after the loan ended")
+    check((row.LCFlyoutHeader.__text or ""):find("Loan master loot to", 1, true) ~= nil, "back to the offer header")
+    check((row.LCRows[1].text.__text or ""):find("Gorgarg", 1, true) ~= nil, "the offer row is the winner again")
+end)
+
 test("reused slot resets the won-card button alpha (stale-fade translucency guard)", function()
     -- A pooled slot whose previous life faded leaves its close/reroll button at a partial alpha.
     -- Every other button gets a SetAlpha(1) on reuse; these two must too, or they render translucent.
@@ -230,6 +271,139 @@ test("reused slot resets the won-card button alpha (stale-fade translucency guar
     check(reused == row, "the new win reused the freed slot")
     check(reused.CloseButton.__alpha == 1, "the close button alpha was reset to 1 on reuse")
     check(reused.RerollButton.__alpha == 1, "the reroll button alpha was reset to 1 on reuse")
+end)
+
+test("ML's phantom cards show the 'On Corpse' side tag; normal cards never do", function()
+    -- A phantom's copy never leaves the boss, so the ML's cards must say so on the card itself
+    -- (a chat alert scrolls away; the ML must not walk off thinking every drop is in their bags).
+    -- The signal is the OnCorpseTag fontstring beside the card, not text inside the lines.
+    local w = bannerWorld(true)
+    local drops = w.env.WeirdLootDropsBanner
+
+    -- ML roll card for a phantom: side tag shown, prio line untouched
+    w.addon:AddRollBannerItem({
+        key = "L:90", link = WON.link, icon = "x", quantity = 1,
+        rollDuration = 30, prio = "MS > OS", onCorpse = true, isOwner = true,
+        onMLEnd = function() end,   -- ML rail present, as on the real owner card
+    })
+    local rollRow
+    for _ = 1, 60 do
+        F.pump(w, 0.001)
+        for _, f in ipairs(drops.LootFrames) do if f.alive and f.rollDuration then rollRow = f end end
+        if rollRow then break end
+    end
+    check(rollRow ~= nil, "roll card landed")
+    check(rollRow.OnCorpseTag:IsShown(), "roll card shows the On Corpse side tag")
+    check((rollRow.OnCorpseTag.__text or ""):find("On Corpse", 1, true) ~= nil, "tag says On Corpse")
+    check((rollRow.PlayerName.__text or ""):find("MS > OS", 1, true) ~= nil, "prio line present")
+    check((rollRow.PlayerName.__text or ""):find("corpse", 1, true) == nil, "prio line carries no inline tag")
+
+    -- a normal roll card carries no tag
+    w.addon:AddRollBannerItem({
+        key = "L:91", link = WON.link, icon = "x", quantity = 1,
+        rollDuration = 30, prio = "MS > OS", isOwner = true, onMLEnd = function() end,
+    })
+    local plainRow
+    for _ = 1, 60 do
+        F.pump(w, 0.001)
+        for _, f in ipairs(drops.LootFrames) do
+            if f.alive and f.rollDuration and f ~= rollRow then plainRow = f end
+        end
+        if plainRow then break end
+    end
+    check(plainRow ~= nil, "plain roll card landed")
+    check(not plainRow.OnCorpseTag:IsShown(), "no side tag on a normal roll")
+
+    -- ML win card for a resolved phantom (corpseSend): side tag shown
+    w.addon:AddLootBannerItem({
+        key = "L:90", link = WON.link, icon = "x", quantity = 1,
+        winners = WON.winners, corpseSend = true,
+        candidates = { { name = "Alice", class = "Mage", roll = 50, bracket = "MS" } },
+        onAward = function() end,
+    })
+    pumpN(w, 0.01, 5)
+    local winRow = firstWonRow(w)
+    check(winRow ~= nil, "win card landed")
+    check(winRow.OnCorpseTag:IsShown(), "win card shows the On Corpse side tag")
+
+    -- delivered: the same-key re-add without corpseSend clears the tag
+    w.addon:AddLootBannerItem({
+        key = "L:90", link = WON.link, icon = "x", quantity = 1, winners = WON.winners,
+    })
+    pumpN(w, 0.01, 5)
+    check(not winRow.OnCorpseTag:IsShown(), "tag clears once the copy is delivered")
+
+    -- INVISIBLE phantom (quest-gated drop the ML can't see): the tag reads "Quest Drop" instead
+    w.addon:AddRollBannerItem({
+        key = "L:92", link = WON.link, icon = "x", quantity = 1,
+        rollDuration = 30, prio = "MS > OS", phantomDrop = true, isOwner = true, onMLEnd = function() end,
+    })
+    local ghostRow
+    for _ = 1, 60 do
+        F.pump(w, 0.001)
+        for _, f in ipairs(drops.LootFrames) do
+            if f.alive and f.rollDuration and f.rowKey == "L:92" then ghostRow = f end
+        end
+        if ghostRow then break end
+    end
+    check(ghostRow ~= nil, "invisible-phantom roll card landed")
+    check(ghostRow.OnCorpseTag:IsShown(), "side tag shown")
+    check((ghostRow.OnCorpseTag.__text or ""):find("Quest Drop", 1, true) ~= nil, "tag reads Quest Drop")
+
+    -- and a reused row flips its text back for the visible-unique kind
+    w.addon:AddLootBannerItem({
+        key = "L:93", link = WON.link, icon = "x", quantity = 1,
+        winners = WON.winners, corpseSend = true,
+        candidates = { { name = "Alice", class = "Mage", roll = 50, bracket = "MS" } },
+        onAward = function() end,
+    })
+    pumpN(w, 0.01, 5)
+    local sendRow
+    for _, f in ipairs(awarded(w).LootFrames) do
+        if f.alive and not f.rollDuration and f.rowKey == "L:93" then sendRow = f end
+    end
+    check(sendRow ~= nil and (sendRow.OnCorpseTag.__text or ""):find("On Corpse", 1, true) ~= nil,
+        "corpse-send card reads On Corpse")
+end)
+
+test("'Items still on corpse' header: one strip above the drops banner while any phantom is outstanding", function()
+    -- ML must use the authority name the roster mock resolves (bannerWorld's names are not the ML)
+    local w = F.makeWorld("Masterlooter", true)
+    F.loadBanner(w)
+    w.addon.db.options.bannerInstant = true
+    F.startSession(w)
+    local core = w.addon.lootCore
+    local strip = w.env.WeirdLootOnCorpseBanner
+
+    w.addon:RefreshRollsLeftBanner()
+    check(not strip:IsShown(), "hidden with nothing outstanding")
+
+    -- an INVISIBLE phantom never shows the strip: the ML cannot re-loot a drop they cannot see
+    -- (the Quest Drop side tag + loan flow carry that case)
+    local ghost = core:MintPhantom(60999, 1)
+    ghost.invisibleToML = true
+    w.addon:RefreshRollsLeftBanner()
+    check(not strip:IsShown(), "invisible phantom alone: no re-loot strip")
+
+    local lotA = core:MintPhantom(60606, 1)
+    core:MintPhantom(60607, 1)                    -- two outstanding items -> still ONE strip
+    w.addon:RefreshRollsLeftBanner()
+    check(strip:IsShown(), "shown while phantoms are unresolved")
+    check((strip.text.__text or ""):find("re%-loot once rolls complete") ~= nil, "carries the instruction text")
+
+    w.addon:StartLiveRoll(lotA.id)
+    w.addon:RegisterInterest(lotA.id, "Gorgarg", "ms")
+    w.addon:ResolveLiveRoll(lotA.id)
+    w.addon:RefreshRollsLeftBanner()
+    check(strip:IsShown(), "still shown while a send is pending (and a second phantom rolls)")
+
+    -- deliver A's copy and resolve B away entirely
+    w.addon.phantomSends[lotA.id] = nil
+    local lotB = core:openPhantomLotForItem(60607)
+    w.addon:StartLiveRoll(lotB.id)
+    w.addon:ResolveLiveRoll(lotB.id)              -- no rollers: resolved, nothing pending
+    w.addon:RefreshRollsLeftBanner()
+    check(not strip:IsShown(), "hidden once nothing is outstanding")
 end)
 
 test("drops banner (roll cards) sits a clear band above the awarded banner (win cards)", function()

@@ -294,7 +294,7 @@ function addon:RestoreRollPopup(lot)
         id = lot.id, itemId = lot.itemId, link = link,
         name = name or link or ("item:" .. tostring(lot.itemId)),
         icon = icon, prio = prio, owner = false, registrants = {}, resolved = false,
-        quantity = lot.count or 1,
+        quantity = lot.count or 1, phantom = lot.phantom or nil, invisible = lot.invisibleToML or nil,
         duration = getRollDuration(),
         deadline = GetTime() + remaining,
     }
@@ -641,6 +641,7 @@ local DISABLED_REASON_TEXT = {
     class = "Your class cannot use this item.",
     unique = "You already have this unique item.",
     quest = "You have already completed this quest.",
+    mount = "You have already learned this mount.",
     noprio = "No priority is listed for this item.",
 }
 
@@ -653,7 +654,7 @@ for tier, label in pairs(CARD_BRACKETS) do CARD_TIERS[label] = tier end
 local function applyInterestButtonAvailability(self, f, roll)
     local playerName = util:GetPlayerName("player")
     local allowed = isPlayerAllowedForRoll(self, roll, playerName)
-    local blockReason = self:RollSelfBlockReason(roll.itemId)
+    local blockReason = self:RollSelfBlockReason(roll.itemId, roll.phantom)
     -- ML authority: BiS availability follows the prio the ML broadcast (roll.prio), not this client's
     -- own list, so a raider with a different or stale prio table can't enable a BiS the ML did not
     -- grant. A no-prio item syncs as DEFAULT_PRIO; any other string means it has a listed priority.
@@ -1090,28 +1091,40 @@ function addon:IsItemPureUnique(itemId)
     return false
 end
 
--- Does the LOCAL player already physically hold itemId? Checks bag contents, equipped gear, the
--- equipped bags themselves (a Unique BAG like Dragon Hide Bag), AND the keyring (where quest-reward
--- keys live). Cannot see the bank.
-function addon:PlayerHoldsItem(itemId)
+-- Is itemId a MOUNT the player has already learned? Learning consumed the original item, so no
+-- ownership count can see this; instead the client stamps the red ITEM_SPELL_KNOWN line
+-- ("Already known", GlobalStrings) on a learned mount's tooltip, so we scan for it with the same
+-- hidden tip as IsItemPureUnique. Gated to actual mount items by GetItemInfo subtype (enUS-client
+-- assumption, shared with IsItemUsableForPlayer). A learned mount is still fully DELIVERABLE (the
+-- unique constraint died with the consumed item): this block is roll etiquette, not delivery.
+local KNOWN_LINE = ITEM_SPELL_KNOWN or "Already known"
+function addon:KnowsMountItem(itemId)
     if not itemId then return false end
-    local maxBag = NUM_BAG_SLOTS or 4
-    for bag, slot in util:BagSlots() do                     -- bag contents (backpack 0 + bags 1..N)
-        if GetContainerItemID(bag, slot) == itemId then return true end
+    local _, _, _, _, _, _, subType = GetItemInfo(itemId)
+    if subType ~= "Mount" then return false end
+    if not self._scanTip then
+        self._scanTip = CreateFrame("GameTooltip", "WeirdLootScanTip", UIParent, "GameTooltipTemplate")
     end
-    for inv = 1, 19 do                                      -- equipped gear (head..tabard)
-        if GetInventoryItemID("player", inv) == itemId then return true end
-    end
-    for bag = 1, maxBag do                                  -- the equipped bags themselves (Unique bags)
-        local inv = ContainerIDToInventoryID and ContainerIDToInventoryID(bag)
-        if inv and GetInventoryItemID("player", inv) == itemId then return true end
-    end
-    local keyring = KEYRING_CONTAINER or -2                 -- the keyring (quest-reward keys live here)
-    local nKeys = (GetKeyRingSize and GetKeyRingSize()) or 0
-    for slot = 1, nKeys do
-        if GetContainerItemID(keyring, slot) == itemId then return true end
+    self._scanTip:SetOwner(UIParent, "ANCHOR_NONE")
+    self._scanTip:ClearLines()
+    self._scanTip:SetHyperlink("item:" .. tostring(itemId))
+    for i = 2, self._scanTip:NumLines() do
+        local fs = _G["WeirdLootScanTipTextLeft" .. i]
+        if fs and fs:GetText() == KNOWN_LINE then return true end
     end
     return false
+end
+
+-- Does the LOCAL player already own itemId anywhere the SERVER's uniqueness check looks?
+-- GetItemCount(id, true) counts bag contents, equipped gear, equipped bags, the keyring, AND the
+-- bank (in-game verified, ChromieCraft 3.3.5a), which is the same domain a Unique pickup is
+-- rejected against: a banked copy blocks looting another exactly like a carried one. The tooltip
+-- prime first: the count read fine off a cold item cache in testing, but the warm costs nothing
+-- and guarantees the client holds the item record before we trust a zero.
+function addon:PlayerHoldsItem(itemId)
+    if not itemId then return false end
+    self:PrimeItemInfo(itemId)
+    return (GetItemCount(itemId, true) or 0) > 0
 end
 
 -- Self-protection: you already hold a pure-Unique copy of itemId, so you can never receive another and
@@ -1120,8 +1133,11 @@ end
 -- The ML is exempt: they always transiently hold the dropped copy during rolls (it sits in their bags
 -- until handed out), so the hold-check would trip on the very item being rolled -- a false positive.
 -- Other players only ever hold a copy that is genuinely theirs.
-function addon:OwnsBlockingUnique(itemId)
-    if self:IsAuthorizedLootMaster() then return false end
+-- EXCEPT on a phantom lot (forPhantom): its copy never enters the ML's bags -- the lot exists
+-- precisely because the ML already holds a blocking copy -- so the ML's held copy is a genuine
+-- block, not the transient drop, and the exemption must not apply.
+function addon:OwnsBlockingUnique(itemId, forPhantom)
+    if not forPhantom and self:IsAuthorizedLootMaster() then return false end
     return self:PlayerHoldsItem(itemId) and self:IsItemPureUnique(itemId)
 end
 
@@ -1142,11 +1158,14 @@ function addon:OwnsQuestReward(itemId)
 end
 
 -- Combined self-block reason for rolling on itemId, or nil if you may roll. "quest" (you already did
--- the quest this drop starts) takes priority over "unique" (you already hold this pure-Unique item).
-function addon:RollSelfBlockReason(itemId)
+-- the quest this drop starts) takes priority over "unique" (you already hold this pure-Unique item),
+-- then "mount" (you already learned this mount; item long consumed, so only the tooltip knows).
+-- forPhantom: the roll is a phantom lot (copy on the corpse), which drops the ML's unique exemption.
+function addon:RollSelfBlockReason(itemId, forPhantom)
     if not itemId then return nil end
     if self:OwnsQuestReward(itemId) then return "quest" end
-    if self:OwnsBlockingUnique(itemId) then return "unique" end
+    if self:OwnsBlockingUnique(itemId, forPhantom) then return "unique" end
+    if self:KnowsMountItem(itemId) then return "mount" end
     -- Class equip-eligibility. IsItemUsableForPlayer matches GetItemInfo's localized subtype against
     -- English tables, i.e. it assumes an enUS client (ChromieCraft is enUS); item 31 tracks making the
     -- match locale-independent. Uncached items resolve as usable, so a still-loading item is never blocked.
@@ -1266,7 +1285,7 @@ function addon:ShowRollBannerCard(roll)
 
     local playerName = util:GetPlayerName("player")
     local allowed = isPlayerAllowedForRoll(self, roll, playerName)
-    local blockReason = self:RollSelfBlockReason(roll.itemId)
+    local blockReason = self:RollSelfBlockReason(roll.itemId, roll.phantom)
     -- same ML-authority rule as the popup: BiS follows the prio the ML broadcast, not local lists
     local hasPrio = roll.prio ~= nil and roll.prio ~= "" and roll.prio ~= DEFAULT_PRIO
     local avail = util:RollTierAvailability(roll.itemId, allowed, false, blockReason, hasPrio)
@@ -1297,6 +1316,13 @@ function addon:ShowRollBannerCard(roll)
         icon = icon or "Interface\\Icons\\INV_Misc_QuestionMark",
         quantity = roll.quantity or 1,
         prio = (roll.prio and roll.prio ~= "") and roll.prio or nil,
+        -- ML only: a phantom's copy is still ON THE CORPSE while it rolls; tag the card so the ML
+        -- doesn't walk off believing every drop made it into their bags. An INVISIBLE phantom (a
+        -- quest-gated drop filtered out of the ML's own loot view) reads "Quest Drop" instead:
+        -- the ML never saw this item and should not look for it in their window or bags at all.
+        -- Raiders roll both kinds normally.
+        onCorpse = (roll.phantom and not roll.invisible and roll.owner) and true or nil,
+        phantomDrop = (roll.phantom and roll.invisible and roll.owner) and true or nil,
         rollDuration = roll.duration or ROLL_DURATION,
         -- the card owns no clock: it asks per tick, and the answer tracks the CURRENT roll's
         -- deadline, so a restore-guessed deadline self-corrects the moment the DROP lands
@@ -1687,7 +1713,7 @@ function addon:StartLiveRoll(lotId)
     local roll = {
         id = lotId, itemId = lot.itemId, link = link, name = name,
         icon = icon, prio = prio, owner = true, registrants = {}, resolved = false,
-        duration = rollDuration, quantity = quantity,
+        duration = rollDuration, quantity = quantity, phantom = lot.phantom or nil, invisible = lot.invisibleToML or nil,
         deadline = GetTime() + rollDuration,   -- authoritative end; sync carries the remaining
     }
     self.live.rolls[lotId] = roll
@@ -1768,8 +1794,28 @@ function addon:ResolveLiveRoll(rollId)
     self:TriggerCallback("RESULTS_UPDATED")
 
     self:CloseInterestPopup(roll)
+    local lot = self.lootCore:Get(rollId)
     if isLootCouncil then
         self:ShowLootCouncilCard(rollId)   -- ML card with the award flyout; raiders got the "lc" WIN above
+    elseif lot and lot.phantom and #winners > 0 then
+        if lot.invisibleToML then
+            -- Invisible phantom (quest-gated drop the ML cannot see): the corpse-send path can
+            -- never work, so the pickup goes through an ML LOAN. Register the pending loan and
+            -- show the loan card; the ML clicks the winner there to start it (MLLoan.lua).
+            self.phantomLoans = self.phantomLoans or {}
+            self.phantomLoans[rollId] = { itemId = lot.itemId, target = winners[1] }
+            self:ShowPhantomLoanCard(rollId)
+            self:Print("Click " .. winners[1] .. " on the win card to lend them master loot for " .. (roll.name or "the item") .. ".")
+        else
+            -- Phantom win: the copy is on the corpse, not in our bags. Register the pending send
+            -- (the observer assigns it the moment the loot window shows the item) and show the
+            -- send card instead of a plain win card. Raiders got the normal WIN above.
+            self.phantomSends = self.phantomSends or {}
+            self.phantomSends[rollId] = { itemId = lot.itemId, target = winners[1] }
+            self:ShowPhantomSendCard(rollId)
+            if self.lootObs and self.lootObs.open then self:TryPhantomSends() end
+            self:Print("Re-open the corpse to send " .. (roll.name or "the item") .. " to " .. winners[1] .. ".")
+        end
     elseif #winners > 0 then
         self:AddLootBannerItem(self:BannerItemFromResult(roll, winners, sections))
     else
@@ -1993,13 +2039,28 @@ function addon:ShowLootCouncilCard(lotId)
         end
     end
 
+    -- Phantom LC lot: the card must carry the side tag through the council-deciding phase too,
+    -- so the ML never reads the item as sitting in their bags while they deliberate. The tag
+    -- clears once every copy has actually left the corpse (delivered/removed).
+    local function applyPhantomTag(item)
+        if not lot.phantom then return item end
+        local pending = false
+        for _, a in ipairs(lot.awards or {}) do
+            if a.state ~= core.AWARD.DELIVERED and a.state ~= core.AWARD.REMOVED then pending = true end
+        end
+        if pending then
+            if lot.invisibleToML then item.phantomDrop = true else item.onCorpse = true end
+        end
+        return item
+    end
+
     if remaining == 0 and #awarded > 0 then
         local pseudo = { id = lotId, link = link, icon = icon, quantity = total, name = name }
-        self:AddLootBannerItem(self:BannerItemFromResult(pseudo, awarded, sections, true))   -- LC Decision winner line
+        self:AddLootBannerItem(applyPhantomTag(self:BannerItemFromResult(pseudo, awarded, sections, true)))   -- LC Decision winner line
         return
     end
 
-    local item = self:BannerLootCouncilItem({ id = lotId, link = link, icon = icon, quantity = total }, sections)
+    local item = applyPhantomTag(self:BannerLootCouncilItem({ id = lotId, link = link, icon = icon, quantity = total }, sections))
     item.candidates = self:LootCouncilCandidates(name, sections)
     item.copiesTotal = total
     item.copiesRemaining = remaining
@@ -2020,7 +2081,8 @@ function addon:AwardLootCouncilCopy(lotId, winner)
     local core = self.lootCore
     local lot = core:Get(lotId)
     if not lot or lot.state ~= core.STATE.RESOLVED then return end
-    if not core:AwardCopy(lotId, winner) then return end
+    local awardIndex = core:AwardCopy(lotId, winner)
+    if not awardIndex then return end
 
     local sections = self:SectionsFromResult(lot.record or {})
     local winners = {}
@@ -2031,7 +2093,113 @@ function addon:AwardLootCouncilCopy(lotId, winner)
         lotId, tostring(lot.itemId or 0), table.concat(winners, ","), "lcwin", "0", self:EncodeSections(sections),
     }, "RAID", nil, "ALERT")
     self:TriggerCallback("RESULTS_UPDATED")
+
+    -- A phantom LC lot: the copy is not in the ML's bags, so once the council pick lands the
+    -- pickup machinery must engage exactly as a rolled phantom would: an ML loan for a drop the
+    -- ML cannot see, a corpse send for one they can. Without this divert, an LC-ruled phantom
+    -- would collapse to a plain win card and no pickup would ever run. Only a real OWED award
+    -- has a pickup (an ML self-award has nothing to move).
+    local award = lot.awards and lot.awards[awardIndex]
+    if lot.phantom and award and award.state == core.AWARD.OWED then
+        if lot.invisibleToML then
+            self.phantomLoans = self.phantomLoans or {}
+            self.phantomLoans[lotId] = { itemId = lot.itemId, target = winner }
+            -- The council pick decided WHO; the loan card's single row (that winner) is the
+            -- deliberate one-click trigger for WHEN the ML's role leaves their hands.
+            self:ShowPhantomLoanCard(lotId)
+            self:Print("Click " .. winner .. " on the win card to lend them master loot for the pickup.")
+        else
+            self.phantomSends = self.phantomSends or {}
+            self.phantomSends[lotId] = { itemId = lot.itemId, target = winner }
+            self:ShowPhantomSendCard(lotId)
+            if self.lootObs and self.lootObs.open then self:TryPhantomSends() end
+            self:Print("Re-open the corpse to send the item to " .. winner .. ".")
+        end
+        return
+    end
+
     self:ShowLootCouncilCard(lotId)
+end
+
+-- Show/refresh the ML's win card for a resolved PHANTOM lot: the copy is on the corpse, so instead
+-- of a plain win card it carries the send state ("on corpse" tag) and the LC-style candidate flyout
+-- to retarget the send (default target = the roll winner; a click retargets and, with the loot
+-- window open, assigns immediately). Collapses to a plain win card once the copy is delivered.
+-- ML only; raiders render the standard win card from the WIN broadcast.
+function addon:ShowPhantomSendCard(lotId)
+    local core = self.lootCore
+    local lot = core:Get(lotId); if not lot then return end
+    local name, link, icon = util:ItemRender(lot.itemId)
+    local sections = self:SectionsFromResult(lot.record or {})
+    local send = self.phantomSends and self.phantomSends[lotId]
+
+    local winners = {}
+    for _, a in ipairs(lot.awards or {}) do
+        if a.winner then winners[#winners + 1] = send and send.target or a.winner end
+    end
+    local pseudo = { id = lotId, link = link, icon = icon, quantity = #(lot.awards or {}), name = name }
+    local item = self:BannerItemFromResult(pseudo, winners, sections)
+
+    if send then
+        item.corpseSend = true
+        item.candidates = self:LootCouncilCandidates(name, sections)
+        item.onAward = function(who) self:SetPhantomSendTarget(lotId, who) end
+        item.onReroll = function()
+            self.phantomSends[lotId] = nil
+            if self:UnlockSessionRoll(lotId) then self:StartLiveRoll(lotId) end
+        end
+    end
+    self:AddLootBannerItem(item)
+end
+
+-- Show/refresh the ML's win card for a resolved INVISIBLE phantom lot (a quest-gated drop the ML
+-- cannot see). The pickup is an ML loan: while no loan is running, the flyout reads "Loan master
+-- loot to" and clicking a name starts the loan to them; while the loan runs the flyout is
+-- replaced by a Cancel Loan button (EndMLLoan: role returns, card reverts to the offer state) and
+-- the card holds the On Corpse tag until the borrower's LOANDONE collapses it to a plain
+-- delivered card. ML only.
+function addon:ShowPhantomLoanCard(lotId)
+    local core = self.lootCore
+    local lot = core:Get(lotId); if not lot then return end
+    local name, link, icon = util:ItemRender(lot.itemId)
+    local sections = self:SectionsFromResult(lot.record or {})
+    local pending = self.phantomLoans and self.phantomLoans[lotId]
+
+    local winners = {}
+    for _, a in ipairs(lot.awards or {}) do
+        if a.winner then winners[#winners + 1] = pending and pending.target or a.winner end
+    end
+    local pseudo = { id = lotId, link = link, icon = icon, quantity = #(lot.awards or {}), name = name }
+    local item = self:BannerItemFromResult(pseudo, winners, sections)
+
+    if pending then
+        item.phantomDrop = true                     -- "Quest Drop" side tag: the ML cannot see this item
+        local loan = self:ActiveMLLoan()
+        if loan and loan.lotId == lotId then
+            -- mid-loan reset: end the loan and take the role back without discarding the winner.
+            -- EndMLLoan re-shows this card (same key), so it reverts to the offer state in place.
+            item.onLoanCancel = function() self:EndMLLoan("cancelled") end
+        else
+            item.loanSend = true
+            -- Singular by design: the loan can only go to the WINNER (the pickup belongs to
+            -- whoever the roll/council decided on, so there is nothing to choose). One row,
+            -- one click: the ML controls WHEN the role leaves their hands, not who gets it.
+            local target = pending.target
+            local cand
+            for _, c in ipairs(self:LootCouncilCandidates(name, sections)) do
+                if util:NormalizeKey(c.name) == util:NormalizeKey(target) then cand = c; break end
+            end
+            item.candidates = { cand or { name = target } }
+            item.onAward = function(who) self:StartMLLoan(lotId, who) end
+        end
+        item.onReroll = function()
+            local active = self:ActiveMLLoan()
+            if active and active.lotId == lotId then self:EndMLLoan("rerolled") end
+            self.phantomLoans[lotId] = nil
+            if self:UnlockSessionRoll(lotId) then self:StartLiveRoll(lotId) end
+        end
+    end
+    self:AddLootBannerItem(item)
 end
 
 -- pack sections for WIN: "label~name=roll,name=roll" joined by ";"

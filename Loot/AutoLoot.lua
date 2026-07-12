@@ -69,16 +69,40 @@ function addon:LOOT_OPENED()
     local session = self:GetCurrentSession()
     if not session.active or not self:IsMasterLooter() then return end
 
+    -- ML loan: we hold the WoW role only as the loan's BORROWER (session authority stays with the
+    -- owner). Pick up ONLY the loaned item; none of the general routing below may run on a
+    -- borrower, or the borrower would master-loot the raid's drops into the wrong bags.
+    local loan = self.ActiveMLLoan and self:ActiveMLLoan()
+    if loan and not self:IsAuthorizedLootMaster() then
+        self:BorrowerLoanPickup(loan)
+        return
+    end
+
+    -- Snapshot the window (source mob + every slot) and fire the observer's checks BEFORE any
+    -- routing assigns below start clearing slots (LootObserver: quest-drop-missing warning +
+    -- pending phantom sends, which may assign their slots first).
+    self:ObserveLootOpened()
+
     local selfIdx = self:FindMasterLootCandidate(UnitName("player"))
     local deerIdx = self.db.deer and self:FindMasterLootCandidate(self.db.deer) or nil
 
     for slot = 1, GetNumLootItems() do
-        if LootSlotIsItem(slot) then
+        -- a slot the observer just assigned to a phantom-send target is spoken for
+        if LootSlotIsItem(slot) and not (self.lootObs and self.lootObs.assigning[slot]) then
             local _, _, _, quality = GetLootSlotInfo(slot)
             local bind = self:LootSlotBindType(slot)
             local target
             if bind == "bop" then
-                target = selfIdx                                  -- BoP -> ML
+                -- A pure-Unique we already hold cannot be self-assigned: GiveMasterLoot silently
+                -- no-ops and the item despawns with the corpse. Leave the slot and let the
+                -- observer warn + phantom-roll it (sent to the winner off the corpse instead).
+                local link = GetLootSlotLink(slot)
+                local itemId = link and util:ItemIdFromLink(link)
+                if itemId and self:LootSlotIsBlockedUnique(itemId) then
+                    self:OnUniqueBlockedSlot(slot, itemId, link)
+                else
+                    target = selfIdx                              -- BoP -> ML
+                end
             elseif bind == "boe" then
                 target = ((quality or 0) >= 4) and selfIdx or deerIdx  -- epic BoE -> ML; else DE'er
             end
@@ -106,6 +130,12 @@ end)
 function addon:LOOT_BIND_CONFIRM(slot)
     local session = self:GetCurrentSession()
     if not session.active or not self:IsMasterLooter() then return end
+    -- a loan borrower only ever self-assigns the loaned item; confirm nothing else for them
+    local loan = self.ActiveMLLoan and self:ActiveMLLoan()
+    if loan and not self:IsAuthorizedLootMaster() then
+        local link = slot and GetLootSlotLink(slot)
+        if not link or util:ItemIdFromLink(link) ~= loan.itemId then return end
+    end
     if slot then
         bindQueue[slot] = true
         bindDispatcher:Show()

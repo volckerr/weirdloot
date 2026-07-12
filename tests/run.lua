@@ -2454,6 +2454,32 @@ test("roll block: PlayerHoldsItem also scans the keyring (quest-reward keys live
     check(w.addon:PlayerHoldsItem(44582), "found in the keyring")
 end)
 
+test("roll block: a mount you already LEARNED self-blocks via the tooltip's Already-known line", function()
+    local w = makeWorld("Saelinen", false)
+    w.env.__itemTypes[40010] = { "Miscellaneous", "Mount" }
+    check(not w.addon:KnowsMountItem(40010), "unlearned mount is not known")
+    eq(w.addon:RollSelfBlockReason(40010), nil, "rollable before learning")
+
+    w.env.__knownItems[40010] = true                  -- learned: the tooltip now says Already known
+    check(w.addon:KnowsMountItem(40010), "learned mount detected off the tooltip")
+    eq(w.addon:RollSelfBlockReason(40010), "mount", "self-block reason is mount")
+
+    -- the subtype gate keeps non-mount Already-known items (recipes) out of this block
+    w.env.__knownItems[40011] = true
+    check(not w.addon:KnowsMountItem(40011), "a known non-mount item is not mount-blocked")
+end)
+
+test("roll block: a BANKED copy counts as held (ownership matches the server's uniqueness domain)", function()
+    local w = makeWorld("Saelinen", false)
+    w.addon.IsItemPureUnique = function(_, id) return id == 40005 end
+    check(not w.addon:PlayerHoldsItem(40005), "not held to start")
+    w.env.__bank[40005] = 1                       -- the copy sits in the BANK, nowhere carried
+    check(w.addon:PlayerHoldsItem(40005), "the banked copy is seen")
+    check(w.addon:OwnsBlockingUnique(40005), "and blocks rolling: the server would reject the pickup")
+    -- the ML side reads the same predicate: a banked unique routes the drop to the phantom flow
+    check(w.addon:LootSlotIsBlockedUnique(40005), "ML doomed-assign check sees the banked copy too")
+end)
+
 test("roll block: a dropped quest-starter is blocked once you hold the quest's reward (quest done)", function()
     local w = makeWorld("Saelinen", false)
     -- 44569 (the dropped normal key) starts a quest whose reward is the keyring key 44582.
@@ -3228,7 +3254,7 @@ end)
 -- This file's own tests ran inline above; their pass/fail counts are already folded into F.
 -- The final summary below totals everything.
 -- ===========================================================================
-local suites = { "tests/unit_util.lua", "tests/unit_config.lua", "tests/unit_guildroster.lua", "tests/unit_lootcore.lua", "tests/unit_resolver.lua", "tests/unit_iteminfo.lua", "tests/unit_preset_registry.lua", "tests/unit_bagslots.lua", "tests/unit_itemfilter.lua", "tests/unit_toc.lua", "tests/unit_perchar.lua", "tests/unit_debug.lua", "tests/unit_upcomingrolls.lua", "tests/unit_uiload.lua", "tests/unit_bannerlifetime.lua" }
+local suites = { "tests/unit_util.lua", "tests/unit_config.lua", "tests/unit_guildroster.lua", "tests/unit_lootcore.lua", "tests/unit_resolver.lua", "tests/unit_iteminfo.lua", "tests/unit_preset_registry.lua", "tests/unit_bagslots.lua", "tests/unit_itemfilter.lua", "tests/unit_toc.lua", "tests/unit_perchar.lua", "tests/unit_debug.lua", "tests/unit_upcomingrolls.lua", "tests/unit_uiload.lua", "tests/unit_bannerlifetime.lua", "tests/unit_phantom.lua", "tests/unit_mlloan.lua" }
 for _, path in ipairs(suites) do
     print(string.format("\n--- running %s ---", path))
     local ok, err = pcall(dofile, path)

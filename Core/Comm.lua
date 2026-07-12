@@ -86,7 +86,17 @@ function addon:InitializeComm()
         buildSnapshot  = function(emit) self:SyncBuildSnapshot(emit) end,
         applySnapshot  = function(lines, ep) self:SyncApplySnapshot(lines, ep) end,
         applyLine      = function(fields) self:SyncApplyLine(fields) end,
-        log            = function(ev, data) self:LogCoreEvent(ev, data) end,
+        log            = function(ev, data)
+            -- Self-healing epoch observation: even state we REJECT (foreign sender, stale-epoch)
+            -- raises our high-water, so the next session we mint out-ranks any stray seized epoch
+            -- (a divergent peer otherwise rejects the real ML as stale FOREVER; see the loan-edge
+            -- grace in Roster.lua for how such an epoch gets minted in the first place).
+            if data then
+                if data.epoch then self:ObserveEpoch(data.epoch) end
+                if data.curEpoch then self:ObserveEpoch(data.curEpoch) end
+            end
+            self:LogCoreEvent(ev, data)
+        end,
         -- Retry schedule: flatter than a steep exponential so a resync after a gap/reload recovers on a
         -- steady cadence. 1.0s first resend lets a message land before we retry; 1.3x growth keeps a
         -- ~24s give-up horizon. Heartbeat re-announces rev every 30s so a quiet-session miss self-heals.
@@ -281,6 +291,7 @@ function addon:BuildLotValue(lot)
         winners = winners,
         awards = awards,
         removed = lot.removed or nil,
+        phantom = lot.phantom or nil,               -- corpse copy: mirrors must not treat it owed-tradeable
         seq = self.lootCore.seq or 0,               -- used by deltas; ignored in a full snapshot
         rollRemaining = tonumber(self:RollRemaining(lot)),   -- number for a rolling lot, else nil
     }
@@ -300,6 +311,7 @@ function addon:DecodeLotValue(v)
         count = v.count or 0,
         responses = v.responses or {},
         removed = v.removed or nil,
+        phantom = v.phantom or nil,
     }
     -- Rebuild the authoritative award disposition so a mirror's liveCount is holder-aware (a copy held
     -- by another ML is not in OUR bags) and a promoted ML inherits the owed map directly.
@@ -347,9 +359,13 @@ function addon:SyncBuildSnapshot(emit)
         hasroster = self.guildRoster and 1 or 0,
         view = (self.guildRoster and self.guildRoster.canViewNotes) and 1 or 0,
         satisfied = self._gnotesSessionId == session.id and 1 or 0 })
+    -- 6th field: the active ML loan (MLLoan.lua), "" when none. Additive like fields 4/5; the
+    -- borrower and every raider need it to pin session authority to the loan's owner while the
+    -- WoW roster names the borrower.
     emit({ "M", self:GetLootMasterName() or "", tostring(core.seq or 0),
         self:IsLootMasterAcceptingTrades() and "1" or "0",
-        needsNotes and "1" or "0" })
+        needsNotes and "1" or "0",
+        self:EncodeMLLoan(session.mlLoan) })
     for _, attendee in ipairs(session.attendees or {}) do
         emit({ "A", attendee.name or "", attendee.className or "", attendee.specName or "", attendee.status or "nil" })
         -- "O" line: the ML's spec/status override for this attendee, so re-loggers and late
@@ -393,6 +409,8 @@ function addon:SyncApplySnapshot(lines, epoch)
             -- A missing 4th field (older ML) defaults to accepting, so we never warn on stale data.
             self._mlAcceptingTrades = (f[4] == nil) or (f[4] == "1")
             mlNeedsNotes = f[5] == "1"
+            -- the ML loan travels with the snapshot; nil (older ML / no loan) clears any stale one
+            self.session.mlLoan = self:DecodeMLLoan(f[6])
         elseif tag == "A" then
             self.session.attendees[#self.session.attendees + 1] = {
                 name = f[2], className = f[3], specName = f[4], status = f[5],
@@ -423,6 +441,9 @@ function addon:SyncApplySnapshot(lines, epoch)
     if mlNeedsNotes and self.MaybeServeGuildNotes then
         self:MaybeServeGuildNotes(self.roster.lootMasterName, epoch)
     end
+    -- The loan just (dis)appeared with this snapshot: re-resolve authority so the pin applies
+    -- before any roster event arrives (the borrower must be pinned BEFORE their role flips).
+    if self.RefreshLootAuthority then self:RefreshLootAuthority() end
 end
 
 -- Host delta applier (raider): one lot upsert.
@@ -668,6 +689,10 @@ function addon:HandleCommMessage(sender, value)
         self:OnWinMessage(fields)
     elseif command == "CANCEL" then
         self:OnCancelMessage(fields)
+    elseif command == "LOANDONE" then
+        self:OnLoanDoneMessage(sender, fields)
+    elseif command == "LOANREADY" then
+        self:OnLoanReadyMessage(sender, fields)
     elseif command == "RSTATE" then
         self:OnRollStateMessage(fields)
     elseif command == "GUEST_UPSERT" then
