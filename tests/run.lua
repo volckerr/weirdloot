@@ -2454,6 +2454,21 @@ test("roll block: PlayerHoldsItem also scans the keyring (quest-reward keys live
     check(w.addon:PlayerHoldsItem(44582), "found in the keyring")
 end)
 
+test("roll block: a mount you already LEARNED self-blocks via the tooltip's Already-known line", function()
+    local w = makeWorld("Saelinen", false)
+    w.env.__itemTypes[40010] = { "Miscellaneous", "Mount" }
+    check(not w.addon:KnowsMountItem(40010), "unlearned mount is not known")
+    eq(w.addon:RollSelfBlockReason(40010), nil, "rollable before learning")
+
+    w.env.__knownItems[40010] = true                  -- learned: the tooltip now says Already known
+    check(w.addon:KnowsMountItem(40010), "learned mount detected off the tooltip")
+    eq(w.addon:RollSelfBlockReason(40010), "mount", "self-block reason is mount")
+
+    -- the subtype gate keeps non-mount Already-known items (recipes) out of this block
+    w.env.__knownItems[40011] = true
+    check(not w.addon:KnowsMountItem(40011), "a known non-mount item is not mount-blocked")
+end)
+
 test("roll block: a BANKED copy counts as held (ownership matches the server's uniqueness domain)", function()
     local w = makeWorld("Saelinen", false)
     w.addon.IsItemPureUnique = function(_, id) return id == 40005 end

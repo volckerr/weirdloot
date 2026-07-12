@@ -641,6 +641,7 @@ local DISABLED_REASON_TEXT = {
     class = "Your class cannot use this item.",
     unique = "You already have this unique item.",
     quest = "You have already completed this quest.",
+    mount = "You have already learned this mount.",
     noprio = "No priority is listed for this item.",
 }
 
@@ -1090,6 +1091,30 @@ function addon:IsItemPureUnique(itemId)
     return false
 end
 
+-- Is itemId a MOUNT the player has already learned? Learning consumed the original item, so no
+-- ownership count can see this; instead the client stamps the red ITEM_SPELL_KNOWN line
+-- ("Already known", GlobalStrings) on a learned mount's tooltip, so we scan for it with the same
+-- hidden tip as IsItemPureUnique. Gated to actual mount items by GetItemInfo subtype (enUS-client
+-- assumption, shared with IsItemUsableForPlayer). A learned mount is still fully DELIVERABLE (the
+-- unique constraint died with the consumed item): this block is roll etiquette, not delivery.
+local KNOWN_LINE = ITEM_SPELL_KNOWN or "Already known"
+function addon:KnowsMountItem(itemId)
+    if not itemId then return false end
+    local _, _, _, _, _, _, subType = GetItemInfo(itemId)
+    if subType ~= "Mount" then return false end
+    if not self._scanTip then
+        self._scanTip = CreateFrame("GameTooltip", "WeirdLootScanTip", UIParent, "GameTooltipTemplate")
+    end
+    self._scanTip:SetOwner(UIParent, "ANCHOR_NONE")
+    self._scanTip:ClearLines()
+    self._scanTip:SetHyperlink("item:" .. tostring(itemId))
+    for i = 2, self._scanTip:NumLines() do
+        local fs = _G["WeirdLootScanTipTextLeft" .. i]
+        if fs and fs:GetText() == KNOWN_LINE then return true end
+    end
+    return false
+end
+
 -- Does the LOCAL player already own itemId anywhere the SERVER's uniqueness check looks?
 -- GetItemCount(id, true) counts bag contents, equipped gear, equipped bags, the keyring, AND the
 -- bank (in-game verified, ChromieCraft 3.3.5a), which is the same domain a Unique pickup is
@@ -1133,12 +1158,14 @@ function addon:OwnsQuestReward(itemId)
 end
 
 -- Combined self-block reason for rolling on itemId, or nil if you may roll. "quest" (you already did
--- the quest this drop starts) takes priority over "unique" (you already hold this pure-Unique item).
+-- the quest this drop starts) takes priority over "unique" (you already hold this pure-Unique item),
+-- then "mount" (you already learned this mount; item long consumed, so only the tooltip knows).
 -- forPhantom: the roll is a phantom lot (copy on the corpse), which drops the ML's unique exemption.
 function addon:RollSelfBlockReason(itemId, forPhantom)
     if not itemId then return nil end
     if self:OwnsQuestReward(itemId) then return "quest" end
     if self:OwnsBlockingUnique(itemId, forPhantom) then return "unique" end
+    if self:KnowsMountItem(itemId) then return "mount" end
     -- Class equip-eligibility. IsItemUsableForPlayer matches GetItemInfo's localized subtype against
     -- English tables, i.e. it assumes an enUS client (ChromieCraft is enUS); item 31 tracks making the
     -- match locale-independent. Uncached items resolve as usable, so a still-loading item is never blocked.

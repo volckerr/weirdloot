@@ -213,6 +213,7 @@ function self.makeWorld(playerName, isML)
                 lines = { "ItemName" }
                 if cur and cur.bound then lines[#lines + 1] = env.ITEM_SOULBOUND end
                 if cur and cur.win   then lines[#lines + 1] = string.format(env.BIND_TRADE_TIME_REMAINING, cur.win .. " sec") end
+                if cur and cur.known then lines[#lines + 1] = env.ITEM_SPELL_KNOWN end
             end
             tip.__lines = lines
             for i = 1, 32 do
@@ -221,14 +222,21 @@ function self.makeWorld(playerName, isML)
         end
         tip.ClearLines = function() end
         tip.SetBagItem = function(_, bag, slot) cur = env.__bags[bag] and env.__bags[bag][slot]; rebuild() end
-        tip.SetHyperlink = function() cur = nil; rebuild() end
+        -- by-id tooltip: renders the "Already known" line for ids flagged in env.__knownItems
+        -- (learned mounts; the real client stamps ITEM_SPELL_KNOWN on their tooltips)
+        tip.SetHyperlink = function(_, link)
+            local id = tonumber(string.match(tostring(link or ""), "item:(%d+)"))
+            cur = (id and env.__knownItems[id]) and { known = true } or nil
+            rebuild()
+        end
         tip.NumLines = function() return tip.__lines and #tip.__lines or 0 end
         rebuild()
         return tip
     end
 
     -- ---- WoW API stubs ----
-    local SCAN_TIP_NAMES = { TradeDeliverScanTip = true, WeirdLootScanTooltip = true }
+    local SCAN_TIP_NAMES = { TradeDeliverScanTip = true, WeirdLootScanTooltip = true, WeirdLootScanTip = true }
+    env.__knownItems = {}                            -- [itemId] = true: tooltip carries "Already known"
     env.CreateFrame = function(_, name, parent)
         local f = SCAN_TIP_NAMES[name] and newScanTip(name) or newFrame()
         if name then env[name] = f; f.__name = name end
@@ -283,6 +291,7 @@ function self.makeWorld(playerName, isML)
     env.ChatThrottleLib = { SendChatMessage = function() end }
     env.ITEM_QUALITY_COLORS = { [4] = { hex = "|cffa335ee" } }
     env.ITEM_SOULBOUND = "Soulbound"
+    env.ITEM_SPELL_KNOWN = "Already known"
     env.ITEM_BIND_ON_EQUIP = "Binds when equipped"
     env.ERR_TRADE_COMPLETE = "Trade complete."
     -- This client emits the unique-count pair backwards: the GIVER (the ML running the addon) sees
@@ -302,12 +311,14 @@ function self.makeWorld(playerName, isML)
         if not it then return nil end
         return "Item" .. it.id, "Interface\\Icons\\inv_test", it.count or 1
     end
+    env.__itemTypes = {}                             -- [itemId] = { class, subclass }; default Armor/Cloth
     env.GetItemInfo = function(idOrLink)
         local id = tonumber(idOrLink) or tonumber(string.match(tostring(idOrLink), "item:(%d+)"))
         if not id then return nil end
         local name = self.ITEMS[id] or ("Item" .. id)
+        local t = env.__itemTypes[id]
         -- name, link, quality, ilvl, reqLevel, class, subclass, stack, equipLoc, texture, sell
-        return name, self.linkFor(id), 4, 200, 80, "Armor", "Cloth", 1, "INVTYPE_SHOULDER", "Interface\\Icons\\inv_test", 0
+        return name, self.linkFor(id), 4, 200, 80, t and t[1] or "Armor", t and t[2] or "Cloth", 1, "INVTYPE_SHOULDER", "Interface\\Icons\\inv_test", 0
     end
     -- GetItemCount mirrors the 3.3.5a client (in-game verified): bags + equipped gear/bags +
     -- keyring always; includeBank=true adds the bank. __bank is GetItemCount-only, matching the
