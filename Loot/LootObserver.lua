@@ -180,7 +180,7 @@ end
 -- Any phantom copy the ML still needs to RE-LOOT: an unresolved VISIBLE phantom (its roll queued
 -- or running) or a pending corpse send. Drives the "re-loot the corpse" header strip, so
 -- INVISIBLE phantoms are deliberately excluded: the ML cannot see those in any loot window and
--- re-looting achieves nothing (the loan flow + the Phantom Drop side tag carry that case).
+-- re-looting achieves nothing (the loan flow + the Quest Drop side tag carry that case).
 -- ML only: phantom lots also exist on raider mirrors.
 function addon:HasCorpseLootOutstanding()
     if not self:IsAuthorizedLootMaster() then return false end

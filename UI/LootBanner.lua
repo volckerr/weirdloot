@@ -344,14 +344,14 @@ end
 -- Phantom side tag: the ML's card carries a tag NEXT TO it on the ML-controls side (outside the
 -- End/Cancel rail on a roll card; under the send/loan flyout on a win card) so the banner can
 -- never read as "every drop is in my bags". Two variants: "On Corpse" (a copy the ML can see but
--- not pick up) and "Phantom Drop" (an invisible quest-gated drop the ML's loot view filtered out
+-- not pick up) and "Quest Drop" (an invisible quest-gated drop the ML's loot view filtered out
 -- entirely; do not look for it in the window or bags). Hidden on any card without a flag (rows
 -- are pooled, so this runs on every configure).
 local function positionOnCorpseTag(frame, data)
     local tag = frame.OnCorpseTag
     if not tag then return end
     if not (data.onCorpse or data.corpseSend or data.phantomDrop) then tag:Hide(); return end
-    tag:SetText(data.phantomDrop and "|cffff6060Phantom Drop|r" or "|cffff6060On Corpse|r")
+    tag:SetText(data.phantomDrop and "|cffff6060Quest Drop|r" or "|cffff6060On Corpse|r")
     tag:ClearAllPoints()
     local left = bannerMLSide() == "LEFT"
     if data.rollDuration and (data.onMLEnd or data.onMLCancel) and frame.MLButtons[1] then
@@ -942,7 +942,7 @@ local function buildBanner(bannerName, medallionCfg)
         PlayerName:SetSize(204, 0)
         PlayerName:SetPoint("TOPLEFT", ItemName, "BOTTOMLEFT", 0, 0)
 
-        -- phantom side tag ("On Corpse" / "Phantom Drop"); text + anchor set per card type in
+        -- phantom side tag ("On Corpse" / "Quest Drop"); text + anchor set per card type in
         -- positionOnCorpseTag
         frame.OnCorpseTag = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         frame.OnCorpseTag:Hide()

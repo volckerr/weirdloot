@@ -1303,7 +1303,7 @@ function addon:ShowRollBannerCard(roll)
         prio = (roll.prio and roll.prio ~= "") and roll.prio or nil,
         -- ML only: a phantom's copy is still ON THE CORPSE while it rolls; tag the card so the ML
         -- doesn't walk off believing every drop made it into their bags. An INVISIBLE phantom (a
-        -- quest-gated drop filtered out of the ML's own loot view) reads "Phantom Drop" instead:
+        -- quest-gated drop filtered out of the ML's own loot view) reads "Quest Drop" instead:
         -- the ML never saw this item and should not look for it in their window or bags at all.
         -- Raiders roll both kinds normally.
         onCorpse = (roll.phantom and not roll.invisible and roll.owner) and true or nil,
@@ -2158,7 +2158,7 @@ function addon:ShowPhantomLoanCard(lotId)
     local item = self:BannerItemFromResult(pseudo, winners, sections)
 
     if pending then
-        item.phantomDrop = true                     -- "Phantom Drop" side tag: the ML cannot see this item
+        item.phantomDrop = true                     -- "Quest Drop" side tag: the ML cannot see this item
         local loan = self:ActiveMLLoan()
         if loan and loan.lotId == lotId then
             -- mid-loan reset: end the loan and take the role back without discarding the winner.

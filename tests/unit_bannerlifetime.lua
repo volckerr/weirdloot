@@ -333,7 +333,7 @@ test("ML's phantom cards show the 'On Corpse' side tag; normal cards never do", 
     pumpN(w, 0.01, 5)
     check(not winRow.OnCorpseTag:IsShown(), "tag clears once the copy is delivered")
 
-    -- INVISIBLE phantom (quest-gated drop the ML can't see): the tag reads "Phantom Drop" instead
+    -- INVISIBLE phantom (quest-gated drop the ML can't see): the tag reads "Quest Drop" instead
     w.addon:AddRollBannerItem({
         key = "L:92", link = WON.link, icon = "x", quantity = 1,
         rollDuration = 30, prio = "MS > OS", phantomDrop = true, isOwner = true, onMLEnd = function() end,
@@ -348,7 +348,7 @@ test("ML's phantom cards show the 'On Corpse' side tag; normal cards never do", 
     end
     check(ghostRow ~= nil, "invisible-phantom roll card landed")
     check(ghostRow.OnCorpseTag:IsShown(), "side tag shown")
-    check((ghostRow.OnCorpseTag.__text or ""):find("Phantom Drop", 1, true) ~= nil, "tag reads Phantom Drop")
+    check((ghostRow.OnCorpseTag.__text or ""):find("Quest Drop", 1, true) ~= nil, "tag reads Quest Drop")
 
     -- and a reused row flips its text back for the visible-unique kind
     w.addon:AddLootBannerItem({
@@ -379,7 +379,7 @@ test("'Items still on corpse' header: one strip above the drops banner while any
     check(not strip:IsShown(), "hidden with nothing outstanding")
 
     -- an INVISIBLE phantom never shows the strip: the ML cannot re-loot a drop they cannot see
-    -- (the Phantom Drop side tag + loan flow carry that case)
+    -- (the Quest Drop side tag + loan flow carry that case)
     local ghost = core:MintPhantom(60999, 1)
     ghost.invisibleToML = true
     w.addon:RefreshRollsLeftBanner()
