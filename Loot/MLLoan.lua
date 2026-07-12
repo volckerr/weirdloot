@@ -330,7 +330,11 @@ function addon:MaybeFulfillLoanPickup()
         return
     end
     if self._loanDoneSent == loan.itemId then return end
-    if self:PlayerHoldsItem(loan.itemId) then
+    -- Bags-only count, NOT PlayerHoldsItem: that predicate is bank-inclusive (ownership domain),
+    -- but this watch answers "did the loot land in my bags just now", and a copy the borrower
+    -- already had banked must not fake a pickup. Rarely relevant in practice: for a pure-Unique
+    -- the roll self-block keeps such a holder from winning at all; this guards the semantics.
+    if (GetItemCount(loan.itemId) or 0) > 0 then
         self._loanDoneSent = loan.itemId
         self:SendLargeMessage("LOANDONE", { tostring(loan.itemId) }, "WHISPER", loan.owner, "ALERT")
         local _, link = util:ItemRender(loan.itemId)

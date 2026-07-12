@@ -1090,28 +1090,16 @@ function addon:IsItemPureUnique(itemId)
     return false
 end
 
--- Does the LOCAL player already physically hold itemId? Checks bag contents, equipped gear, the
--- equipped bags themselves (a Unique BAG like Dragon Hide Bag), AND the keyring (where quest-reward
--- keys live). Cannot see the bank.
+-- Does the LOCAL player already own itemId anywhere the SERVER's uniqueness check looks?
+-- GetItemCount(id, true) counts bag contents, equipped gear, equipped bags, the keyring, AND the
+-- bank (in-game verified, ChromieCraft 3.3.5a), which is the same domain a Unique pickup is
+-- rejected against: a banked copy blocks looting another exactly like a carried one. The tooltip
+-- prime first: the count read fine off a cold item cache in testing, but the warm costs nothing
+-- and guarantees the client holds the item record before we trust a zero.
 function addon:PlayerHoldsItem(itemId)
     if not itemId then return false end
-    local maxBag = NUM_BAG_SLOTS or 4
-    for bag, slot in util:BagSlots() do                     -- bag contents (backpack 0 + bags 1..N)
-        if GetContainerItemID(bag, slot) == itemId then return true end
-    end
-    for inv = 1, 19 do                                      -- equipped gear (head..tabard)
-        if GetInventoryItemID("player", inv) == itemId then return true end
-    end
-    for bag = 1, maxBag do                                  -- the equipped bags themselves (Unique bags)
-        local inv = ContainerIDToInventoryID and ContainerIDToInventoryID(bag)
-        if inv and GetInventoryItemID("player", inv) == itemId then return true end
-    end
-    local keyring = KEYRING_CONTAINER or -2                 -- the keyring (quest-reward keys live here)
-    local nKeys = (GetKeyRingSize and GetKeyRingSize()) or 0
-    for slot = 1, nKeys do
-        if GetContainerItemID(keyring, slot) == itemId then return true end
-    end
-    return false
+    self:PrimeItemInfo(itemId)
+    return (GetItemCount(itemId, true) or 0) > 0
 end
 
 -- Self-protection: you already hold a pure-Unique copy of itemId, so you can never receive another and

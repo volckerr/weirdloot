@@ -158,8 +158,13 @@ H.test("borrower acquisition watch whispers LOANDONE once, end to end", function
     ml.addon:StartMLLoan(lot.id, "Gorgarg")
     clearWire(); ml.addon:BroadcastSession(); flushWireTo(borrower)
 
-    -- the loaned item lands in the borrower's bags
-    borrower.addon.PlayerHoldsItem = function(self, id) return id == KEY_ID end
+    -- a copy the borrower already had BANKED must not fake the pickup (the watch counts bags only)
+    borrower.env.__bank[KEY_ID] = 1
+    borrower.addon:MaybeFulfillLoanPickup()
+    H.check(borrower.addon._loanDoneSent == nil, "a banked copy does not trigger LOANDONE")
+
+    -- the loaned item lands in the borrower's bags (the pickup watch counts bags, not bank)
+    borrower.env.__bags[0][1] = { id = KEY_ID, count = 1 }
     clearWire()
     borrower.addon:MaybeFulfillLoanPickup()
     borrower.addon:MaybeFulfillLoanPickup()   -- a second BAG_UPDATE must not re-send

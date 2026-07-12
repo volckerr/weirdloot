@@ -2454,6 +2454,17 @@ test("roll block: PlayerHoldsItem also scans the keyring (quest-reward keys live
     check(w.addon:PlayerHoldsItem(44582), "found in the keyring")
 end)
 
+test("roll block: a BANKED copy counts as held (ownership matches the server's uniqueness domain)", function()
+    local w = makeWorld("Saelinen", false)
+    w.addon.IsItemPureUnique = function(_, id) return id == 40005 end
+    check(not w.addon:PlayerHoldsItem(40005), "not held to start")
+    w.env.__bank[40005] = 1                       -- the copy sits in the BANK, nowhere carried
+    check(w.addon:PlayerHoldsItem(40005), "the banked copy is seen")
+    check(w.addon:OwnsBlockingUnique(40005), "and blocks rolling: the server would reject the pickup")
+    -- the ML side reads the same predicate: a banked unique routes the drop to the phantom flow
+    check(w.addon:LootSlotIsBlockedUnique(40005), "ML doomed-assign check sees the banked copy too")
+end)
+
 test("roll block: a dropped quest-starter is blocked once you hold the quest's reward (quest done)", function()
     local w = makeWorld("Saelinen", false)
     -- 44569 (the dropped normal key) starts a quest whose reward is the keyring key 44582.

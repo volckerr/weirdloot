@@ -309,6 +309,30 @@ function self.makeWorld(playerName, isML)
         -- name, link, quality, ilvl, reqLevel, class, subclass, stack, equipLoc, texture, sell
         return name, self.linkFor(id), 4, 200, 80, "Armor", "Cloth", 1, "INVTYPE_SHOULDER", "Interface\\Icons\\inv_test", 0
     end
+    -- GetItemCount mirrors the 3.3.5a client (in-game verified): bags + equipped gear/bags +
+    -- keyring always; includeBank=true adds the bank. __bank is GetItemCount-only, matching the
+    -- real client where bank contents are not reachable through the container APIs remotely.
+    env.__bank = {}                                  -- [itemId] = count
+    env.GetItemCount = function(idOrLink, includeBank)
+        local id = tonumber(idOrLink) or tonumber(string.match(tostring(idOrLink), "item:(%d+)"))
+        if not id then return 0 end
+        local n = 0
+        for b = 0, 4 do
+            local B = env.__bags[b]
+            for s = 1, (B and B.size or 0) do
+                local it = B and B[s]
+                if it and it.id == id then n = n + (it.count or 1) end
+            end
+        end
+        for _, invId in pairs(env.__equipped) do
+            if invId == id then n = n + 1 end
+        end
+        for _, keyId in pairs(env.__keyring) do
+            if keyId == id then n = n + 1 end
+        end
+        if includeBank then n = n + (env.__bank[id] or 0) end
+        return n
+    end
     -- ---- bag + trade-window model (drives the real TradeDeliver engine) ----
     env.__bags = {}                                  -- [bag] = { size=N, [slot]={id,count,link} }
     for b = 0, 4 do env.__bags[b] = { size = 16 } end
