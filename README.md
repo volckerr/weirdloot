@@ -34,6 +34,7 @@ WeirdLoot is a World of Warcraft 3.3.5a addon for Wrath-era raid loot handling. 
 - Raiders choose from `BiS`, `MS`, `MU`, `OS`, `TM`, or `Pass`.
 - Resolution uses bracket priority first, then named-item priority, then class/spec loot rules, then roster status, then rolls.
 - Named-item rules support hard priority chains and `LC` fallbacks; a session-level LC override can put any item to the council.
+- Rolls self-block (only Pass) on items you could never use or receive: wrong class, a Unique you already own (bank included), a quest drop you already completed, a mount you already learned.
 - Loot-council items resolve to an `LC Decision` card where the loot master awards each copy from a candidate flyout.
 - Result details are written in a human-readable form so you can see why an item resolved the way it did.
 
@@ -59,7 +60,7 @@ WeirdLoot is a World of Warcraft 3.3.5a addon for Wrath-era raid loot handling. 
 
 ### Unlootable drops
 
-- A unique-equipped drop the loot master already owns rolls off the corpse and master-loots straight to the winner on re-loot; the cards and a banner strip say the copy is still on the corpse.
+- A Unique (carry-one) drop the loot master already owns rolls off the corpse and master-loots straight to the winner on re-loot; the cards and a banner strip say the copy is still on the corpse.
 - A quest-gated drop the loot master cannot see warns at loot-open, rolls as a normal (invisible) item, and delivers through a temporary master-loot loan: the winner borrows the loot-master role for that one pickup and it returns automatically.
 - The loan is guarded end to end: authority stays pinned to the owner, the raid leader is prompted for the role swaps, and timeouts cover an absent borrower.
 - A running loan can be reset from the item's card or the Loot Master tab with `Cancel Loan`; the winner is kept.
