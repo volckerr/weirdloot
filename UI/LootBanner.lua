@@ -563,6 +563,17 @@ local function BossBanner_ConfigureLootFrame(lootFrame, data)
         lootFrame.Background2:Hide()
         lootFrame:SetBackdropBorderColor(0, 0, 0, 0)   -- hidden in full mode (SetItemButtonQuality shows the icon frame)
     end
+
+    -- Minimal cards have no dark chrome behind the text, so the quality-colored item name gets an
+    -- outline to hold contrast against any world background (full mode's art supplies its own).
+    -- The font's stock 1,-1 shadow comes OFF with the outline: stacked they render heavier than
+    -- the outline alone (the client has no thinner outline weight than OUTLINE).
+    -- Per-configure like the rest of this block: pooled rows restyle when the mode toggles.
+    local nameFont, nameSize = lootFrame.ItemName:GetFont()
+    if type(nameFont) == "string" then
+        lootFrame.ItemName:SetFont(nameFont, nameSize, minimal and "OUTLINE" or "")
+        lootFrame.ItemName:SetShadowOffset(minimal and 0 or 1, minimal and 0 or -1)
+    end
 end
 
 local ROW_FADE_TIME = 0.4   -- seconds a row takes to fade out once its lifetime ends
