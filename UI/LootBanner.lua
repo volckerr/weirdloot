@@ -269,42 +269,59 @@ end
 
 -- Fill and show the loot master's LC award flyout: header ("Award copy k of N"), one clickable row per
 -- candidate (class-colored name, roll or "-", bracket), anchored off the card's ML-controls side so it
--- tracks the same left/right setting the End/Cancel rail uses. Hidden (returns false) for a raider card
--- or a plain win card, which carry no candidates/onAward.
+-- tracks the same left/right setting the End/Cancel rail uses. While an ML loan RUNS the same panel
+-- swaps to the loan state: a "Master loot lent out" header and a single Cancel row (ends the loan and
+-- keeps the winner; the same-key re-add flips the panel back to the offer). Hidden (returns false)
+-- for a raider card or a plain win card, which carry none of the callbacks.
 local function populateLCFlyout(frame, data)
     local cands = data.candidates
-    if not ((data.lootCouncil or data.corpseSend or data.loanSend) and data.onAward and cands and #cands > 0) then
+    local offer = (data.lootCouncil or data.corpseSend or data.loanSend) and data.onAward and cands and #cands > 0
+    if not offer and not data.onLoanCancel then
         frame.LCFlyout:Hide()
         return false
     end
-    local total = data.copiesTotal or 1
-    local remaining = data.copiesRemaining or total
-    local nextCopy = math.min(total - remaining + 1, total)
-    if data.loanSend then
-        -- invisible phantom: rows lend the WoW ML role so the picked player collects the drop
-        frame.LCFlyoutHeader:SetText("|cffffd200Loan master loot to|r")
-    elseif data.corpseSend then
-        -- phantom send card: rows retarget the pending master-loot send, not an LC award
-        frame.LCFlyoutHeader:SetText("|cffffd200Send from corpse to|r")
-    else
-        frame.LCFlyoutHeader:SetText(total > 1
-            and ("|cffffd200Award copy " .. nextCopy .. " of " .. total .. "|r")
-            or "|cffffd200Award to|r")
-    end
 
     local shown = 0
-    for i, c in ipairs(cands) do
-        local row = lcFlyoutRow(frame, i)
-        local y = -20 - (i - 1) * FLYOUT_ROW_H
+    if data.onLoanCancel then
+        frame.LCFlyoutHeader:SetText("|cffffd200Master loot lent out|r")
+        local row = lcFlyoutRow(frame, 1)
         row:ClearAllPoints()
-        row:SetPoint("TOPLEFT", frame.LCFlyout, "TOPLEFT", 5, y)
-        row:SetPoint("TOPRIGHT", frame.LCFlyout, "TOPRIGHT", -5, y)
-        local rollText = c.roll and tostring(c.roll) or "-"
-        row.text:SetText(colorName(c.name, c.class) .. "  |cffbbbbbb" .. rollText .. "|r  |cffffd200" .. (c.bracket or "") .. "|r")
-        row.awardName = c.name
-        row:SetScript("OnClick", function() if data.onAward then data.onAward(row.awardName) end end)
+        row:SetPoint("TOPLEFT", frame.LCFlyout, "TOPLEFT", 5, -20)
+        row:SetPoint("TOPRIGHT", frame.LCFlyout, "TOPRIGHT", -5, -20)
+        row.text:SetText("|cffff6060Cancel loan|r")
+        row.awardName = nil
+        row:SetScript("OnClick", function() if data.onLoanCancel then data.onLoanCancel() end end)
         row:Show()
-        shown = i
+        shown = 1
+    else
+        local total = data.copiesTotal or 1
+        local remaining = data.copiesRemaining or total
+        local nextCopy = math.min(total - remaining + 1, total)
+        if data.loanSend then
+            -- invisible phantom: rows lend the WoW ML role so the picked player collects the drop
+            frame.LCFlyoutHeader:SetText("|cffffd200Loan master loot to|r")
+        elseif data.corpseSend then
+            -- phantom send card: rows retarget the pending master-loot send, not an LC award
+            frame.LCFlyoutHeader:SetText("|cffffd200Send from corpse to|r")
+        else
+            frame.LCFlyoutHeader:SetText(total > 1
+                and ("|cffffd200Award copy " .. nextCopy .. " of " .. total .. "|r")
+                or "|cffffd200Award to|r")
+        end
+
+        for i, c in ipairs(cands) do
+            local row = lcFlyoutRow(frame, i)
+            local y = -20 - (i - 1) * FLYOUT_ROW_H
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", frame.LCFlyout, "TOPLEFT", 5, y)
+            row:SetPoint("TOPRIGHT", frame.LCFlyout, "TOPRIGHT", -5, y)
+            local rollText = c.roll and tostring(c.roll) or "-"
+            row.text:SetText(colorName(c.name, c.class) .. "  |cffbbbbbb" .. rollText .. "|r  |cffffd200" .. (c.bracket or "") .. "|r")
+            row.awardName = c.name
+            row:SetScript("OnClick", function() if data.onAward then data.onAward(row.awardName) end end)
+            row:Show()
+            shown = i
+        end
     end
     for i = shown + 1, #frame.LCRows do frame.LCRows[i]:Hide() end
     frame.LCFlyout:SetHeight(24 + shown * FLYOUT_ROW_H)
@@ -1020,22 +1037,6 @@ local function buildBanner(bannerName, medallionCfg)
         end)
         frame.RerollButton:Hide()
 
-        -- Cancel Loan (phantom loan card, ML only): shown while an ML loan is running for this
-        -- lot. Ends the loan (role returns to the owner) WITHOUT discarding the winner: the
-        -- callback re-shows this card under the same key, so it reverts to the loan-offer state
-        -- in place -- no fade, unlike Reroll.
-        frame.LoanCancelButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-        frame.LoanCancelButton:SetText("Cancel Loan")
-        frame.LoanCancelButton:SetWidth(90)
-        frame.LoanCancelButton:SetHeight(18)
-        frame.LoanCancelButton:SetPoint("RIGHT", frame.RerollButton, "LEFT", -4, 0)
-        frame.LoanCancelButton:SetScript("OnClick", function()
-            local cb = frame.onLoanCancel
-            frame.LoanCancelButton:Hide()
-            if cb then cb() end
-        end)
-        frame.LoanCancelButton:Hide()
-
         -- LC award flyout (loot master only): a panel off the card's ML-controls side, populated in the
         -- won-card configure path (populateLCFlyout) with one clickable candidate row per roller/named.
         frame.LCFlyout = CreateFrame("Frame", nil, frame)
@@ -1509,10 +1510,7 @@ local function buildBanner(bannerName, medallionCfg)
         frame.onReroll = nil
         frame.RerollButton:SetAlpha(1)
         frame.RerollButton:Hide()       -- only a no-winner won card shows it
-        frame.onLoanCancel = nil
-        frame.LoanCancelButton:SetAlpha(1)
-        frame.LoanCancelButton:Hide()   -- only a mid-loan phantom card shows it
-        frame.LCFlyout:Hide()           -- only a loot-council ML award card shows it (populated below)
+        frame.LCFlyout:Hide()           -- only an ML award/offer/loan card shows it (populated below)
         if data.rollDuration then
             -- roll-prompt row: a countdown of the roll timer + clickable bracket buttons. The live
             -- feed passes getTimeLeft (the roll's own deadline is the clock; self-correcting and
@@ -1577,9 +1575,7 @@ local function buildBanner(bannerName, medallionCfg)
         if frame.closeImmediate then frame.CloseButton:Show() end   -- ML: no wait
         frame.onReroll = data.onReroll
         if data.onReroll then frame.RerollButton:Show() end   -- "no one rolled" ML card / LC award card
-        frame.onLoanCancel = data.onLoanCancel
-        if data.onLoanCancel then frame.LoanCancelButton:Show() end   -- mid-loan phantom card
-        populateLCFlyout(frame, data)                         -- LC award flyout (ML only); hides itself otherwise
+        populateLCFlyout(frame, data)                         -- ML award/offer/loan flyout; hides itself otherwise
         positionOnCorpseTag(frame, data)                      -- after the flyout: the send card's tag hangs under it
         if additional then
             for _, f in ipairs(self.LootFrames) do
@@ -1910,7 +1906,7 @@ local function buildBanner(bannerName, medallionCfg)
             copiesRemaining = item.copiesRemaining, -- LC award card (ML): copies still to assign
             awarded = item.awarded,         -- LC award card (ML): winners assigned so far
             onReroll = item.onReroll,   -- won card only: ML reroll callback; present = show the Reroll button
-            onLoanCancel = item.onLoanCancel, -- phantom loan card (ML): mid-loan cancel; present = show Cancel Loan
+            onLoanCancel = item.onLoanCancel, -- phantom loan card (ML): mid-loan; the flyout shows Cancel instead of the offer
             rollRemaining = item.rollRemaining, -- static seconds-left (demo/plain data; ignored with a thunk)
             getTimeLeft = item.getTimeLeft, -- live feed: per-tick seconds left from the roll's own deadline
             key = item.key,             -- roll card only: lets the live feed close/update the card by id
@@ -1960,8 +1956,6 @@ local function buildBanner(bannerName, medallionCfg)
                             BossBanner_ConfigureLootFrame(f, data)
                             f.onReroll = data.onReroll
                             if data.onReroll then f.RerollButton:Show() else f.RerollButton:Hide() end
-                            f.onLoanCancel = data.onLoanCancel
-                            if data.onLoanCancel then f.LoanCancelButton:Show() else f.LoanCancelButton:Hide() end
                             populateLCFlyout(f, data)
                             positionOnCorpseTag(f, data)   -- delivered: the tag clears with the send state
                         end

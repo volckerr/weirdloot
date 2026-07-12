@@ -183,7 +183,11 @@ function addon:InitializeSession()
     if restoredLoan and restoredLoan.owner and playerName
         and util:NormalizeKey(restoredLoan.owner) == util:NormalizeKey(playerName) then
         self._endRestoredLoan = true
+        self:LogCoreEvent("loan-restore-keep", { borrower = restoredLoan.borrower })
     else
+        if restoredLoan then
+            self:LogCoreEvent("loan-restore-scrub", { owner = restoredLoan.owner })
+        end
         self.session.mlLoan = nil
     end
 

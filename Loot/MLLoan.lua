@@ -17,7 +17,7 @@ local util = addon.util
 -- clears the loan, and takes the WoW role back. Backstops: a timeout, a borrower-left-raid check,
 -- and "/wl loan cancel".
 
-local LOAN_TIMEOUT = 300      -- seconds before an unfulfilled loan auto-cancels (owner side)
+local LOAN_TIMEOUT = 180      -- seconds before an unfulfilled loan auto-cancels (owner side)
 local READY_NAG_AFTER = 10    -- seconds without the borrower's LOANREADY before telling the owner to swap manually
 
 -- The current loan, from this client's session mirror (owner and raiders alike), or nil.
@@ -51,6 +51,26 @@ local function isSelfRaidLeader()
         if name and util:NormalizeKey(util:StripRealm(name)) == me then return rank == 2 end
     end
     return false
+end
+
+-- True when `name` holds the ACTUAL WoW master-looter role, read raw from the API. Deliberately
+-- bypasses the addon's resolved view: during a loan and the transit window that view answers the
+-- loan's owner regardless of who really holds the role, and these callers need the real holder to
+-- know whether the role ever moved (the swap is ack/human-gated, so a cancel often lands before
+-- it ran). False when the holder cannot be read, so callers err toward acting.
+local function rawWoWMasterLooterIs(name)
+    local method, partyIdx, raidIdx = GetLootMethod()
+    if method ~= "master" then return false end
+    local holder
+    if raidIdx and raidIdx > 0 then
+        holder = GetRaidRosterInfo(raidIdx)
+    elseif partyIdx == 0 then
+        holder = UnitName("player")
+    elseif partyIdx and partyIdx > 0 then
+        holder = UnitName("party" .. partyIdx)
+    end
+    return holder ~= nil
+        and util:NormalizeKey(util:StripRealm(holder)) == util:NormalizeKey(util:StripRealm(name or ""))
 end
 
 -- Owner backstop ticker: cancel a loan that never fulfills (timeout) or whose borrower left.
@@ -95,6 +115,7 @@ function addon:StartMLLoan(lotId, borrower)
         lotId = lotId,
     }
     self._loanStartedAt = GetTime()
+    self:LogCoreEvent("loan-start", { borrower = borrower, item = lot.itemId, lot = lotId })
     -- The role swap is GATED on the borrower's LOANREADY ack (OnLoanReadyMessage): SetLootMethod
     -- flips the roster near-instantly while the loan snapshot crawls the throttled comm lane, so
     -- swapping on a timer races the propagation -- a borrower whose roster flips first has no pin
@@ -134,11 +155,20 @@ function addon:EndMLLoan(reason)
     loanTicker:Hide()
     self:AutoBroadcastSession(true)
 
-    if isSelfRaidLeader() then
-        if SetLootMethod then SetLootMethod("master", util:StripRealm(loan.owner)) end
-    else
-        self:Print("Loan ended: have the raid leader return master loot to " .. loan.owner .. ".")
+    -- Only touch the role when it actually moved: a cancel before the ack/human-gated swap ran
+    -- leaves master loot with the owner, so re-issuing SetLootMethod would churn a loot-method
+    -- event for the whole raid and the "have the leader return it" print would be noise.
+    local moved = not rawWoWMasterLooterIs(loan.owner)
+    local swapped = false
+    if moved then
+        if isSelfRaidLeader() then
+            if SetLootMethod then SetLootMethod("master", util:StripRealm(loan.owner)); swapped = true end
+        else
+            self:Print("Loan ended: have the raid leader return master loot to " .. loan.owner .. ".")
+        end
     end
+    self:LogCoreEvent("loan-end", { reason = reason or "done", borrower = loan.borrower,
+        moved = moved and 1 or 0, swap = swapped and 1 or 0 })
     self:Print("Master-loot loan to " .. loan.borrower .. " ended (" .. (reason or "done") .. ").")
     if loan.lotId and self.ShowPhantomLoanCard then self:ShowPhantomLoanCard(loan.lotId) end
     if self.RefreshRollsLeftBanner then self:RefreshRollsLeftBanner() end
@@ -163,6 +193,7 @@ function addon:OnLoanDoneMessage(sender, fields)
     if loan and senderKey == util:NormalizeKey(loan.borrower)
         and (not itemId or itemId == loan.itemId) then
         if not self:IsAuthorizedLootMaster() then return end
+        self:LogCoreEvent("loan-done", { from = sender, item = itemId, via = "live" })
         local lotId = loan.lotId
         if lotId then
             self:MarkPhantomAwardDelivered(lotId, loan.borrower)
@@ -180,6 +211,7 @@ function addon:OnLoanDoneMessage(sender, fields)
     -- different loan that may be running.
     for lotId, pending in pairs(self.phantomLoans or {}) do
         if pending.itemId == itemId and util:NormalizeKey(pending.target or "") == senderKey then
+            self:LogCoreEvent("loan-done", { from = sender, item = itemId, via = "registry", lot = lotId })
             self:MarkPhantomAwardDelivered(lotId, pending.target)
             self.phantomLoans[lotId] = nil
             local _, link = util:ItemRender(itemId)
@@ -189,6 +221,7 @@ function addon:OnLoanDoneMessage(sender, fields)
             return
         end
     end
+    self:LogCoreEvent("loan-done", { from = sender, item = itemId, via = "unmatched" })
 end
 
 -- ---------------------------------------------------------------------------
@@ -225,6 +258,14 @@ function addon:MaybePromptLeaderLoanSwap()
     elseif prevLoan then
         if me == util:NormalizeKey(prevLoan.owner) then return end
         StaticPopup_Hide("WEIRDLOOT_LOAN_SWAP")
+        -- Prompt the restore only when the role actually moved: a loan cancelled before the
+        -- leader ever performed the swap leaves master loot with the owner, and asking to
+        -- "return master loot" to the person who holds it is a no-op prompt.
+        if rawWoWMasterLooterIs(prevLoan.owner) then
+            self:LogCoreEvent("loan-restore-prompt", { owner = prevLoan.owner, shown = 0 })
+            return
+        end
+        self:LogCoreEvent("loan-restore-prompt", { owner = prevLoan.owner, shown = 1 })
         local dialog = StaticPopup_Show("WEIRDLOOT_LOAN_RESTORE", prevLoan.owner)
         if dialog then dialog.data = util:StripRealm(prevLoan.owner) end
     end
@@ -236,8 +277,12 @@ function addon:OnLoanReadyMessage(sender, fields)
     local loan = self:ActiveMLLoan()
     if not loan or not self:IsAuthorizedLootMaster() then return end
     if not self._loanAwaitingReady then return end
-    if util:NormalizeKey(sender or "") ~= util:NormalizeKey(loan.borrower) then return end
+    if util:NormalizeKey(sender or "") ~= util:NormalizeKey(loan.borrower) then
+        self:LogCoreEvent("loan-ready", { from = sender, ok = 0 })
+        return
+    end
     self._loanAwaitingReady = nil
+    self:LogCoreEvent("loan-ready", { from = sender, ok = 1, swap = isSelfRaidLeader() and 1 or 0 })
 
     local lot = self.lootCore and loan.lotId and self.lootCore:Get(loan.lotId)
     local _, link = util:ItemRender((lot and lot.itemId) or loan.itemId)

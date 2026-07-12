@@ -248,6 +248,7 @@ function addon:RefreshLootAuthority()
         local session = self:GetCurrentSession()
         session.mlLoan = nil
         loan = nil
+        self:LogCoreEvent("loan-void", { owner = gone })
         self:Print("Master-loot loan voided: its owner " .. gone .. " left the raid.")
     end
 
@@ -264,6 +265,7 @@ function addon:RefreshLootAuthority()
     -- gone (arming any later would leave this very resolve unguarded against a poisoned read).
     if not loan and self._lastLoanOwner then
         self._loanRestorePending = { owner = self._lastLoanOwner, since = GetTime() }
+        self:LogCoreEvent("loan-transit", { state = "armed", owner = self._lastLoanOwner })
     end
     self._lastLoanOwner = loan and loan.owner or nil
 
@@ -280,10 +282,13 @@ function addon:RefreshLootAuthority()
         local resolvedKey = lootMasterName and util:NormalizeKey(lootMasterName) or nil
         if resolvedKey == ownerKey then
             self._loanRestorePending = nil                       -- the expected event: disarm
+            self:LogCoreEvent("loan-transit", { state = "disarmed", why = "owner-confirmed" })
         elseif numRaidNow > 0 and not nameInRaid(pending.owner) then
             self._loanRestorePending = nil                       -- owner gone: script is void
+            self:LogCoreEvent("loan-transit", { state = "disarmed", why = "owner-left" })
         elseif GetTime() - (pending.since or 0) > RESTORE_DEADLINE then
             self._loanRestorePending = nil                       -- dead-roster escape hatch
+            self:LogCoreEvent("loan-transit", { state = "disarmed", why = "deadline" })
         else
             lootMasterName = pending.owner
             isLootMaster = playerName ~= nil and ownerKey == util:NormalizeKey(playerName)
@@ -360,12 +365,14 @@ function addon:RefreshLootAuthority()
             self._endRestoredLoan = nil          -- already ended some other way
         elseif numRaidNow > 0 then
             self._endRestoredLoan = nil
+            self:LogCoreEvent("loan-reload-end", { borrower = loan.borrower })
             self:EndMLLoan("owner reloaded")
         elseif self.bagSettleAt and GetTime() >= self.bagSettleAt then
             self._endRestoredLoan = nil
             local session = self:GetCurrentSession()
             session.mlLoan = nil
             self._lastLoanOwner = nil            -- ungrouped: no transit window to arm
+            self:LogCoreEvent("loan-reload-drop", { borrower = loan.borrower })
         end
     end
 

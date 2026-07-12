@@ -205,7 +205,7 @@ test("LC award card: candidate flyout fires the award callback, then clears on t
     check(not row.RerollButton:IsShown(), "reroll is hidden once the copy is awarded")
 end)
 
-test("phantom loan card: Cancel Loan fires without fading; the offer state returns on the same-key re-add", function()
+test("phantom loan card: the flyout swaps to Cancel loan mid-loan, no fade, and back to the offer on re-add", function()
     local w = bannerWorld(true, function(opt)
         opt.forceKeepResultPopup = true
         opt.resultPopupAutoCloseEnabled = true
@@ -213,7 +213,7 @@ test("phantom loan card: Cancel Loan fires without fading; the offer state retur
     end)
     local cancelled = false
     local KEY = "L:loan1"
-    -- mid-loan shape: no offer flyout (no onAward), a live cancel callback
+    -- mid-loan shape: no offer (no onAward/candidates), a live cancel callback
     w.addon:AddLootBannerItem({
         key = KEY, link = WON.link, icon = "x", quantity = 1, phantomDrop = true,
         winners = { { name = "Gorgarg", class = "Warrior", roll = 77, section = "MS" } },
@@ -223,10 +223,14 @@ test("phantom loan card: Cancel Loan fires without fading; the offer state retur
     local row
     for _ = 1, 60 do F.pump(w, 0.001); row = firstWonRow(w); if row then break end end
     check(row, "the loan card was shown")
-    check(row.LoanCancelButton:IsShown(), "Cancel Loan is shown while the loan runs")
-    check(not row.LCFlyout:IsShown(), "no loan-offer flyout mid-loan")
-    row.LoanCancelButton:GetScript("OnClick")(row.LoanCancelButton)
-    check(cancelled, "clicking Cancel Loan fired the callback")
+    check(row.LCFlyout:IsShown(), "the flyout panel is shown mid-loan (same spot as the offer)")
+    check((row.LCFlyoutHeader.__text or ""):find("lent out", 1, true) ~= nil, "header says the role is lent out")
+    local r1 = row.LCRows[1]
+    check(r1 and r1:IsShown(), "one flyout row")
+    check((r1.text.__text or ""):find("Cancel loan", 1, true) ~= nil, "and it is the cancel action")
+    check(not (row.LCRows[2] and row.LCRows[2]:IsShown()), "no other rows mid-loan")
+    r1:GetScript("OnClick")(r1)
+    check(cancelled, "clicking the cancel row fired the callback")
     check(row.alive and not row.fading, "the card did NOT fade: it reverts in place")
 
     -- the callback re-shows the card under the same key, back in the offer state
@@ -237,8 +241,9 @@ test("phantom loan card: Cancel Loan fires without fading; the offer state retur
         onAward = function() end,
         onReroll = function() end,
     })
-    check(not row.LoanCancelButton:IsShown(), "Cancel Loan hidden once the loan ended")
-    check(row.LCFlyout:IsShown(), "the loan-offer flyout is back")
+    check(row.LCFlyout:IsShown(), "the flyout is still up after the loan ended")
+    check((row.LCFlyoutHeader.__text or ""):find("Loan master loot to", 1, true) ~= nil, "back to the offer header")
+    check((row.LCRows[1].text.__text or ""):find("Gorgarg", 1, true) ~= nil, "the offer row is the winner again")
 end)
 
 test("reused slot resets the won-card button alpha (stale-fade translucency guard)", function()

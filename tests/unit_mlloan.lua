@@ -183,7 +183,10 @@ H.test("only one loan at a time; /wl loan cancel path clears it", function()
     H.check(w.addon:ActiveMLLoan() == nil, "cancel clears the loan")
 end)
 
-H.test("raid leader (not the owner) is prompted to swap on loan start and restore on loan end", function()
+-- a leader-world roster where the test controls who holds the WoW ML role; Leadguy stays leader
+local LEADER_RAID = { { name = "Masterlooter" }, { name = "Gorgarg" }, { name = "Leadguy", rank = 2 } }
+
+H.test("raid leader (not the owner) is prompted to swap on start and restore ONLY if the role moved", function()
     clearWire()
     local ml = makeWorld("Masterlooter", true)
     local leader = makeWorld("Leadguy", true)   -- rank 2 in the roster mock, but not the ML
@@ -206,11 +209,22 @@ H.test("raid leader (not the owner) is prompted to swap on loan start and restor
     clearWire(); ml.addon:BroadcastSession(); flushWireTo(leader)
     H.eq(#shows, 1, "same loan re-synced: no duplicate prompt")
 
+    -- cancel BEFORE the leader ever swapped: the role never moved, so no restore prompt
+    ml.addon:EndMLLoan("cancelled")
+    clearWire(); ml.addon:BroadcastSession(); flushWireTo(leader)
+    H.eq(#shows, 1, "cancel before the swap: NO restore prompt for a role that never left")
+
+    -- second loan; this time the leader performs the swap before the pickup completes
+    ml.addon:StartMLLoan(lot.id, "Gorgarg")
+    clearWire(); ml.addon:BroadcastSession(); flushWireTo(leader)
+    H.eq(#shows, 2, "swap prompt again for the new loan")
+    mockRoster(leader, LEADER_RAID, 2)   -- the leader handed the WoW role to the borrower
+
     ml.addon:OnLoanDoneMessage("Gorgarg", { tostring(KEY_ID) })
     clearWire(); ml.addon:BroadcastSession(); flushWireTo(leader)
-    H.eq(#shows, 2, "one popup on loan end")
-    H.eq(shows[2].which, "WEIRDLOOT_LOAN_RESTORE", "it is the restore prompt")
-    H.eq(shows[2].arg, "Masterlooter", "prompting to return the role to the owner")
+    H.eq(#shows, 3, "one popup on loan end")
+    H.eq(shows[3].which, "WEIRDLOOT_LOAN_RESTORE", "it is the restore prompt")
+    H.eq(shows[3].arg, "Masterlooter", "prompting to return the role to the owner")
 end)
 
 H.test("role swap is gated on the borrower's LOANREADY ack (the propagation-race fix)", function()
@@ -458,9 +472,10 @@ H.test("owner /reload mid-loan: the restored loan ends through the front door, t
     ml.addon:RefreshLootAuthority()   -- next resolve: role still with the borrower -> transit
     H.check(ml.addon:IsAuthorizedLootMaster(), "authority retained (transit) while the role returns")
 
+    mockRoster(leader, LEADER_RAID, 2)   -- the leader's roster also shows the borrower holding the role
     flushWireTo(leader)
     H.check(leader.addon:ActiveMLLoan() == nil, "raid mirror cleared by the loan-less broadcast")
-    H.eq(#shows, 1, "restore popup fired on the leader")
+    H.eq(#shows, 1, "restore popup fired on the leader (the role really moved)")
     H.eq(shows[1].which, "WEIRDLOOT_LOAN_RESTORE", "prompting the role return")
 end)
 
