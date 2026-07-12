@@ -30,7 +30,7 @@ local MINIMAL_BG_BOOST = 0.6        -- minimalist-only second pass of the row ar
                                     -- cards, so thicken the colored background slightly (alpha of the extra layer)
 
 -- Loot banner look/behavior, all read straight from db.options (the Options tab writes them; the
--- /wlbanner demo previews whatever they currently say):
+-- /wl debug banner previews whatever they currently say):
 --   * minimal: drop the header/footer chrome, turn the dice/bag medallion into a per-card badge.
 --   * instant: every animation snaps (no intro flourish, per-card slide/glow, or fade-out).
 --   * ML side: which card edge the loot-master End/Cancel rail hangs off (RIGHT/LEFT).
@@ -2372,12 +2372,12 @@ function addon:ShowLootBanner(opts)
     end
 end
 
--- DEBUG preview: strip before commit. `/wlbanner` drives BOTH banners with sample data so the stacked
+-- DEBUG preview: `/wl debug banner` drives BOTH banners with sample data so the stacked
 -- region (dice drops + bag awarded, both with the lightning intro) can be seen under realistic flow.
 local wlbannerTimer = CreateFrame("Frame")
 
 -- EXAMPLE ONLY: fire one-shot callbacks after a delay (used to show a chosen roll as a win a couple
--- seconds after it's dismissed). This is demo plumbing for /wlbanner, NOT real banner behavior.
+-- seconds after it's dismissed). This is demo plumbing for /wl debug banner, NOT real banner behavior.
 local exampleDeferQueue = {}
 local exampleDefer = CreateFrame("Frame")
 exampleDefer:SetScript("OnUpdate", function(_, e)
@@ -2514,7 +2514,7 @@ local function runBannerExample()
             -- EXAMPLE ONLY: when the player dismisses this roll by selecting a bracket twice, drop the
             -- same item into the won section ~2s later, as if the roll resolved in their favor. Real
             -- banners get wins from the loot master's resolve, never from a local click; this only
-            -- exists to demo the roll -> won flow in /wlbanner.
+            -- exists to demo the roll -> won flow in /wl debug banner.
             onChosen = function(bracket)
                 if awarded or bracket == "Pass" then return end
                 awarded = true
@@ -2559,7 +2559,7 @@ local function runBannerExample()
     end)
 end
 
--- `/wlbanner` previews the stacked banners (dice drops + bag awarded) with sample data, using the
--- current Options-tab look (minimal/instant/ML-side): toggle those in Options, then re-run to see it.
-SLASH_WLBANNER1 = "/wlbanner"
-SlashCmdList["WLBANNER"] = function() runBannerExample() end
+-- `/wl debug banner` previews the stacked banners (dice drops + bag awarded) with sample data, using
+-- the current Options-tab look (minimal/instant/ML-side): toggle those in Options, then re-run to
+-- see it. A debug surface, deliberately NOT a root slash command.
+function addon:RunBannerDemo() runBannerExample() end

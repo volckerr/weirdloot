@@ -234,6 +234,13 @@ function addon:HandleDebugCommand(rest)
         self:Print("  on / off: start or stop tracing.   status: state and record count.   alerts on/off: live chat warnings on bad cases (default on with debug).")
         self:Print("  mark <label>: insert a marker for easier log chasing.   dump [n]: show last n records (default 12).   clear: wipe it.")
         self:Print("  sync: force a session sync.   drop <n>: (test) drop the next N sync sends.")
+        self:Print("  banner: preview the loot banners with sample data (uses the current Options look).")
+    elseif verb == "banner" then
+        if self.RunBannerDemo then
+            self:RunBannerDemo()
+        else
+            self:Print("The banner UI is not loaded.")
+        end
     elseif verb == "status" then
         local drop = self._syncDropCount or 0
         self:Print(string.format("Core debug log: %s, alerts %s, %d record(s), seq %d, cap %d.%s",
