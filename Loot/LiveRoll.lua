@@ -1330,6 +1330,10 @@ function addon:ShowRollBannerCard(roll)
         -- Raiders roll both kinds normally.
         onCorpse = (roll.phantom and not roll.invisible and roll.owner) and true or nil,
         phantomDrop = (roll.phantom and roll.invisible and roll.owner) and true or nil,
+        -- A pure-Unique cannot be received once you leave the instance (the ML hands it off at the
+        -- corpse), so warn the ROLLERS to stay. Not the ML: they are the one delivering it, so the
+        -- line is noise on their card. Client-side tooltip scan; no wire.
+        stayInstance = (not roll.owner and self:IsItemPureUnique(roll.itemId)) or nil,
         rollDuration = roll.duration or ROLL_DURATION,
         -- the card owns no clock: it asks per tick, and the answer tracks the CURRENT roll's
         -- deadline, so a restore-guessed deadline self-corrects the moment the DROP lands
