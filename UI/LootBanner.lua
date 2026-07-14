@@ -376,7 +376,7 @@ local function positionStayTag(frame, data)
     if not tag then return end
     if not data.stayInstance then tag:Hide(); if bg then bg:Hide() end; return end
     tag:SetText("|cffffd200Unique: stay in the instance to receive|r")
-    -- Centered ON the top border: the card's border line crosses the text like a strikethrough.
+    -- Anchored centered on the card's top edge.
     tag:ClearAllPoints()
     tag:SetPoint("CENTER", frame, "TOP", 0, 0)
     tag:Show()
@@ -979,9 +979,8 @@ local function buildBanner(bannerName, medallionCfg)
         frame.OnCorpseTag:Hide()
 
         -- raider-facing "stay in the instance" warning for a Unique drop (you cannot receive it once
-        -- you leave). Sits centered ON the card's top border so the line reads like a strikethrough;
-        -- a translucent-black plate (the card's own bg art) keeps the text legible while the border
-        -- still shows through. Placed by positionStayTag.
+        -- you leave). Anchored on the card's top edge, with a translucent-black plate (the card's own
+        -- bg art) behind it to keep the text legible against the world. Placed by positionStayTag.
         frame.StayTagBg = frame:CreateTexture(nil, "ARTWORK")
         frame.StayTagBg = SetAtlas(frame.StayTagBg, "LootBanner-ItemBg", true)
         frame.StayTagBg:SetVertexColor(0, 0, 0)   -- black tint; keep the atlas art's own baked alpha
@@ -1968,7 +1967,7 @@ local function buildBanner(bannerName, medallionCfg)
             onMLEnd = item.onMLEnd,     -- roll card only: ML control; present = show the End button, fired on click
             onMLCancel = item.onMLCancel, -- roll card only: ML control; present = show the Cancel button
             getRollers = item.getRollers, -- roll card only: thunk returning { name, class, bracket } rollers for the hover
-            stayInstance = item.stayInstance, -- roll card only: truthy -> Unique stay-in-instance strike-through warning
+            stayInstance = item.stayInstance, -- roll card only: truthy -> Unique stay-in-instance warning
         }
         if item.key then
             if self.seenKeys[item.key] then
@@ -2578,7 +2577,7 @@ local function runBannerExample()
             OS = "Not used for this item type.",
             TM = "You already have this unique item.",
         }
-        firstRoll.stayInstance = true       -- demo: Unique stay-in-instance strike-through warning
+        firstRoll.stayInstance = true       -- demo: Unique stay-in-instance warning
     end
     addon:AddRollBannerItem(firstRoll)
     addon:AddRollBannerItem(rollItem())
