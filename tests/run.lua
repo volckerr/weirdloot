@@ -2491,6 +2491,18 @@ test("roll block: a dropped quest-starter is blocked once you hold the quest's r
     eq(w.addon:RollSelfBlockReason(44577), "quest", "heroic drop blocked by the heroic reward")
 end)
 
+test("roll block: the Archivum Data Disc is blocked once you hold the Celestial Planetarium Key", function()
+    local w = makeWorld("Saelinen", false)
+    -- 45506/45857 (the dropped disc) is consumed starting a keeper questline whose downstream reward
+    -- is the Celestial Planetarium Key 45796/45798.
+    eq(w.addon:RollSelfBlockReason(45506), nil, "10-man disc not blocked before the questline is done")
+    w.env.__keyring[1] = 45796                     -- earned the planetarium key -> questline done
+    eq(w.addon:RollSelfBlockReason(45506), "quest", "holding the key blocks rolling the 10-man disc")
+    eq(w.addon:RollSelfBlockReason(45857), nil, "25-man disc unaffected by the 10-man key")
+    w.env.__keyring[2] = 45798                      -- heroic key
+    eq(w.addon:RollSelfBlockReason(45857), "quest", "holding the heroic key blocks the 25-man disc")
+end)
+
 -- ===========================================================================
 -- ADVERSARIAL / FAILURE-MODE cases (where things break, by design or as a known gap)
 -- ===========================================================================

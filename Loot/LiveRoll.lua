@@ -1149,6 +1149,13 @@ end
 addon.ROLL_REWARD_GATE = {
     [44569] = 44582,   -- Key to the Focusing Iris (normal)        -> reward keyring key 44582
     [44577] = 44581,   -- Heroic Key to the Focusing Iris (heroic) -> reward keyring key 44581
+    -- Archivum Data Disc (Assembly of Iron). The disc starts quest 13604/13817 which grants NO item;
+    -- the downstream Celestial Planetarium Key (45796/45798) is only obtainable after that keeper
+    -- questline, so holding it means the disc quest is long done. Gate is transitive, not the disc
+    -- quest's direct reward: a player mid-questline (disc done, key not yet earned) is not self-blocked,
+    -- but the server hides the disc from their loot anyway, so the ML-side quest-gated detection covers it.
+    [45506] = 45796,   -- Archivum Data Disc (10) -> Celestial Planetarium Key 45796
+    [45857] = 45798,   -- Archivum Data Disc (25) -> Heroic Celestial Planetarium Key 45798
 }
 
 -- You already hold the quest reward this drop grants, so you finished the quest -> don't roll on it.
