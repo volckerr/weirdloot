@@ -29,6 +29,14 @@ addon.QUEST_GATED_MOB_DROPS = {
         label = "the Key to the Focusing Iris",
         items = { [1] = 44569, [2] = 44577 },
     },
+    -- Archivum Data Disc, Assembly of Iron (Ulduar). Both Steelbreaker and Runemaster Molgeim carry
+    -- it at 100%, so either corpse (last of the three killed) is the looted one; register all four
+    -- size-specific npc ids. Unlike Sapphiron the disc has distinct item ids per size, so each entry
+    -- lists only its own difficulty. 10=45506, 25=45857.
+    [32867] = { label = "the Archivum Data Disc", items = { [1] = 45506 } }, -- Steelbreaker (10)
+    [32927] = { label = "the Archivum Data Disc", items = { [1] = 45506 } }, -- Runemaster Molgeim (10)
+    [33693] = { label = "the Archivum Data Disc", items = { [2] = 45857 } }, -- Steelbreaker (25)
+    [33692] = { label = "the Archivum Data Disc", items = { [2] = 45857 } }, -- Runemaster Molgeim (25)
 }
 
 -- Firm, local alert: red chat line + the raid-warning sound. The persistent signal lives on the
