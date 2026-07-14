@@ -368,6 +368,26 @@ local function positionOnCorpseTag(frame, data)
     tag:Show()
 end
 
+-- Raider-facing Unique warning strip: a Unique drop cannot be received once you leave the instance
+-- (the ML hands it off at the corpse), so warn the roller to stay. data.stayInstance is "top" or
+-- "bottom" (demo picks the placement; live use will settle on one). Purely local: no wire, no ML gate.
+local function positionStayTag(frame, data)
+    local tag, bg = frame.StayTag, frame.StayTagBg
+    if not tag then return end
+    if not data.stayInstance then tag:Hide(); if bg then bg:Hide() end; return end
+    tag:SetText("|cffffd200Unique: stay in the instance to receive|r")
+    -- Centered ON the top border: the card's border line crosses the text like a strikethrough.
+    tag:ClearAllPoints()
+    tag:SetPoint("CENTER", frame, "TOP", 0, 0)
+    tag:Show()
+    if bg then
+        bg:ClearAllPoints()
+        bg:SetPoint("BOTTOM", tag, "CENTER", 0, -8)   -- pin the (good) bottom edge; grow upward only
+        bg:SetSize(tag:GetStringWidth() + 6, 14)      -- height trims the top; bottom stays put
+        bg:Show()
+    end
+end
+
 -- Apply a roll card's bracket-button availability (data.disabled: label -> reason string / true =
 -- gray + hover reason) and its preselected bracket (data.selected). Shared by the initial row build
 -- and the dedupe re-assert, so a restore-raced card recomputes its availability from the real prio
@@ -957,6 +977,20 @@ local function buildBanner(bannerName, medallionCfg)
         -- positionOnCorpseTag
         frame.OnCorpseTag = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         frame.OnCorpseTag:Hide()
+
+        -- raider-facing "stay in the instance" warning for a Unique drop (you cannot receive it once
+        -- you leave). Sits centered ON the card's top border so the line reads like a strikethrough;
+        -- a translucent-black plate (the card's own bg art) keeps the text legible while the border
+        -- still shows through. Placed by positionStayTag.
+        frame.StayTagBg = frame:CreateTexture(nil, "ARTWORK")
+        frame.StayTagBg = SetAtlas(frame.StayTagBg, "LootBanner-ItemBg", true)
+        frame.StayTagBg:SetVertexColor(0, 0, 0)   -- black tint; keep the atlas art's own baked alpha
+        frame.StayTagBg:Hide()
+
+        frame.StayTag = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        frame.StayTag:SetJustifyH("CENTER")
+        frame.StayTag:SetTextColor(1, 0.82, 0.2)
+        frame.StayTag:Hide()
 
         frame.IconHitBox = CreateFrame("Frame", nil, frame)
         local IconHitBox = frame.IconHitBox
@@ -1552,6 +1586,7 @@ local function buildBanner(bannerName, medallionCfg)
                 for _, btn in ipairs(frame.MLButtons) do btn:Hide() end
             end
             positionOnCorpseTag(frame, data)
+            positionStayTag(frame, data)
             local b1 = frame.RollButtons[1]
             rbDbg(("add-DROP idx=%s reused=%s b_own=%.2f b_eff=%.2f f_own=%.2f f_eff=%.2f"):format(
                 tostring(frame.__idx), tostring(reused), b1:GetAlpha(), b1:GetEffectiveAlpha(),
@@ -1573,6 +1608,8 @@ local function buildBanner(bannerName, medallionCfg)
         for _, btn in ipairs(frame.RollButtons) do btn:Hide() end
         frame.onMLEnd, frame.onMLCancel = nil, nil
         for _, btn in ipairs(frame.MLButtons) do btn:Hide() end
+        if frame.StayTag then frame.StayTag:Hide() end   -- roll-only strip; a reused row turning into a won card drops it
+        if frame.StayTagBg then frame.StayTagBg:Hide() end
         -- Won row lifetime. Every row runs the same examine countdown (the configured auto-hide
         -- seconds), and each additional drop EXTENDS the rows already shown by half (capped at the
         -- window), reviving any mid-fade, so earlier items linger to be read. A row whose client is
@@ -1931,6 +1968,7 @@ local function buildBanner(bannerName, medallionCfg)
             onMLEnd = item.onMLEnd,     -- roll card only: ML control; present = show the End button, fired on click
             onMLCancel = item.onMLCancel, -- roll card only: ML control; present = show the Cancel button
             getRollers = item.getRollers, -- roll card only: thunk returning { name, class, bracket } rollers for the hover
+            stayInstance = item.stayInstance, -- roll card only: truthy -> Unique stay-in-instance strike-through warning
         }
         if item.key then
             if self.seenKeys[item.key] then
@@ -2540,6 +2578,7 @@ local function runBannerExample()
             OS = "Not used for this item type.",
             TM = "You already have this unique item.",
         }
+        firstRoll.stayInstance = true       -- demo: Unique stay-in-instance strike-through warning
     end
     addon:AddRollBannerItem(firstRoll)
     addon:AddRollBannerItem(rollItem())
