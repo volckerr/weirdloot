@@ -455,5 +455,182 @@ test("mute-risk canary stays silent under normal pacing", function()
     ok(#warns == 0, "no mute-risk warning under the default pacer (peak stayed below muteWarn)")
 end)
 
+-- ---------------------------------------------------------------------------
+-- channel codec stability across LibDeflate versions
+--
+-- LibDeflate is a LibStub global: whichever copy in the AddOns folder registers the highest
+-- minor serves every addon on that client. Its built-in addon-channel codec is version
+-- dependent (1.0.0 escapes "|", 1.0.2 does not), so two raiders on different LibDeflate
+-- copies silently disagree on the wire. WeirdComm builds its own codec instead; these tests
+-- pin that decision against both versions known to be in the wild: the shipped 1.0.0
+-- (Libs/LibDeflate, also what Details/WeakAuras/RCLootCouncil carry) and 1.0.2 (upstream
+-- current, shipped by ElvUI's ElvUI_Libraries), vendored verbatim as a fixture.
+-- ---------------------------------------------------------------------------
+local WC_MAJOR = "WeirdComm-1.0"
+
+-- Load a LibDeflate copy in isolation so it neither reads nor upgrades the LibStub entry
+-- (LibStub:NewLibrary hands back the SAME table, so a second version would mutate the first).
+local function loadDeflate(path)
+    local savedStub, savedGlobal = LibStub, _G.LibDeflate
+    LibStub, _G.LibDeflate = nil, nil
+    local lib = assert(loadfile(path))()
+    LibStub, _G.LibDeflate = savedStub, savedGlobal
+    return lib
+end
+
+-- A second WeirdComm instance whose CODEC was built from `deflate` at load time.
+local function weirdCommWith(deflate)
+    local pd, pdm = LibStub.libs["LibDeflate"], LibStub.minors["LibDeflate"]
+    local pw, pwm = LibStub.libs[WC_MAJOR], LibStub.minors[WC_MAJOR]
+    LibStub.libs["LibDeflate"], LibStub.minors["LibDeflate"] = deflate, 99
+    LibStub.libs[WC_MAJOR], LibStub.minors[WC_MAJOR] = nil, nil
+    local wc = assert(loadfile("Libs/WeirdComm-1.0/WeirdComm-1.0.lua"))()
+    LibStub.libs["LibDeflate"], LibStub.minors["LibDeflate"] = pd, pdm
+    LibStub.libs[WC_MAJOR], LibStub.minors[WC_MAJOR] = pw, pwm
+    return wc
+end
+
+local D100 = loadDeflate("Libs/LibDeflate/LibDeflate.lua")
+local D102 = loadDeflate("tests/fixtures/LibDeflate-1.0.2.lua")
+local WC100 = weirdCommWith(D100)
+local WC102 = weirdCommWith(D102)
+
+-- Byte-hostile corpus: every single byte, the escape/reserved bytes in sequence, real item links
+-- (pipe-dense), a full WeirdSync session snapshot, and blobs big enough to span several frames.
+local LINK = "|cffa335ee|Hitem:40395:0:0:0:0:0:0:0:80:0:0:0:0|h[Torch of Holy Fire]|h|r"
+-- EncodeFrames({"ROLL","a|b",1}, msgId 1): 7-byte header, then the serialized value with
+-- \000 -> \001\004 and \124 ("|") -> \001\003.
+local GOLDEN_FRAME = "0101010\001\004:BROLL2a\001\003b\003"
+
+-- The real payload shape WeirdSync ships: the whole per-copy ledger, one lot per drop, links and
+-- raider names inline. This is the message that matters most (biggest, multi-frame, sent on every
+-- authoritative change) and the one that was silently corrupting across LibDeflate versions.
+local RAIDERS = { "Volcker", "Anglemoss", "Grimtusk", "Bathory", "Kettle", "Morgraine", "Sylvane",
+                  "Zugzug", "Dornhal", "Fizzlebang", "Kaelith", "Brumhilde", "Tarnak", "Ysolde" }
+local BRACKETS = { "BiS", "MS", "MU", "OS", "TM", "Pass" }
+local function snapshot(nLots)
+    local lots = {}
+    for i = 1, nLots do
+        local awards, rolls = {}, {}
+        for j = 1, 1 + (i % 3) do
+            awards[j] = { winner = RAIDERS[(i + j) % #RAIDERS + 1], state = (j == 1) and "owed" or "delivered",
+                          holder = RAIDERS[(i * j) % #RAIDERS + 1], copy = j }
+        end
+        for j = 1, 1 + (i % #RAIDERS) do
+            rolls[RAIDERS[j]] = { bracket = BRACKETS[(i + j) % #BRACKETS + 1], roll = (i * 31 + j * 7) % 100 + 1 }
+        end
+        lots[i] = {
+            id = i,
+            link = ("|cffa335ee|Hitem:%d:0:0:0:0:0:0:0:80:0:0:0:0|h[Trinket Of Testing %d]|h|r"):format(40000 + i, i),
+            itemId = 40000 + i, count = 1 + (i % 2), state = (i % 4 == 0) and "open" or "resolved",
+            awards = awards, rolls = rolls,
+        }
+    end
+    return { epoch = "1700123456", rev = nLots * 3, authority = "Masterlooter", lots = lots }
+end
+
+local CORPUS = {
+    { "LOOT", LINK, 1 },
+    { "ROLL", LINK, "Volcker", "BiS" },
+    { "ROSTER", RAIDERS },
+    { "PIPES", "|||\000\001\002\003|\124\124" },
+    { "SESSION", { { LINK, 1 }, { LINK, 2 }, { LINK, 3 } }, "Anglemoss", 12345 },
+    { "BIG", string.rep(LINK, 20) },
+    { "RANDOMISH", rndBytes(3000, 0x51ED2701) },
+    snapshot(1), snapshot(2), snapshot(5), snapshot(12), snapshot(30), snapshot(60),
+}
+-- Pipe-dense blobs across the frame-boundary sizes: raw item links are the worst case for a codec
+-- that escapes "|", since escaping grows the payload and shifts every chunk boundary.
+for _, n in ipairs({ 2, 3, 5, 9, 17, 40 }) do
+    CORPUS[#CORPUS + 1] = { "LINKS", string.rep(LINK, n), n }
+end
+for i = 0, 255 do
+    -- low-entropy: deflates, exercises the byte in the SOURCE
+    CORPUS[#CORPUS + 1] = { "B", string.char(i), string.rep(string.char(i, (i + 1) % 256), 60) }
+    -- high-entropy: falls back to raw, so the byte reaches the codec unmodified
+    CORPUS[#CORPUS + 1] = { "R", string.char(i), rndBytes(40, 0x1000 + i) .. string.char(i) }
+end
+
+-- Every payload is also driven with compression DISABLED. Deflate output is high-entropy and only
+-- hits 0x7C by chance, but WeirdComm sends anything under compressMin (or that fails to shrink)
+-- raw, and raw WeirdLoot payloads are item links: pipe-dense by construction. Both paths matter.
+local COMPRESS_MODES = { { 96, "compressed where it shrinks" }, { math.huge, "always raw" } }
+
+test("LibDeflate's OWN addon-channel codec differs between 1.0.0 and 1.0.2", function()
+    -- The regression that motivated the private codec. Not a WeirdComm behaviour: it records
+    -- why EncodeForWoWAddonChannel is unusable for a raid that does not update in lockstep.
+    local s = "pipe|here"
+    ok(D100._VERSION == "1.0.0-release", "shipped LibDeflate is 1.0.0 (got " .. tostring(D100._VERSION) .. ")")
+    ok(D102._VERSION == "1.0.2-release", "fixture LibDeflate is 1.0.2 (got " .. tostring(D102._VERSION) .. ")")
+    ok(D100:EncodeForWoWAddonChannel(s) ~= D102:EncodeForWoWAddonChannel(s), "built-in codecs disagree on '|'")
+    ok(D100:DecodeForWoWAddonChannel(D102:EncodeForWoWAddonChannel(s)) == nil, "1.0.2 output is rejected by 1.0.0")
+    ok(D102:DecodeForWoWAddonChannel(D100:EncodeForWoWAddonChannel(s)) ~= s, "1.0.0 output is silently mangled by 1.0.2")
+end)
+
+test("WeirdComm frames are byte-identical across LibDeflate versions", function()
+    for _, mode in ipairs(COMPRESS_MODES) do
+        local cmin, label = mode[1], mode[2]
+        local mismatched, roundtripFail = 0, 0
+        for _, v in ipairs(CORPUS) do
+            local a = assert(WC100.EncodeFrames(v, 7, FP, cmin))
+            local b = assert(WC102.EncodeFrames(v, 7, FP, cmin))
+            local same = (#a == #b)
+            if same then for i = 1, #a do if a[i] ~= b[i] then same = false break end end end
+            if not same then mismatched = mismatched + 1 end
+            local okA, gotA = WC100.DecodeFrames(a)
+            local okB, gotB = WC102.DecodeFrames(b)
+            if not (okA and okB and deepeq(gotA, v) and deepeq(gotB, v)) then roundtripFail = roundtripFail + 1 end
+        end
+        ok(mismatched == 0, label .. ": identical frame bytes for all " .. #CORPUS .. " payloads (" .. mismatched .. " differed)")
+        ok(roundtripFail == 0, label .. ": each version round-trips its own frames (" .. roundtripFail .. " failed)")
+    end
+end)
+
+test("WeirdComm interops across LibDeflate versions in both directions", function()
+    for _, mode in ipairs(COMPRESS_MODES) do
+        local cmin, label = mode[1], mode[2]
+        local fwd, rev = 0, 0
+        for _, v in ipairs(CORPUS) do
+            local okF, gotF = WC102.DecodeFrames(assert(WC100.EncodeFrames(v, 3, FP, cmin)))
+            local okR, gotR = WC100.DecodeFrames(assert(WC102.EncodeFrames(v, 3, FP, cmin)))
+            if not (okF and deepeq(gotF, v)) then fwd = fwd + 1 end
+            if not (okR and deepeq(gotR, v)) then rev = rev + 1 end
+        end
+        ok(fwd == 0, label .. ": 1.0.0 sender -> 1.0.2 receiver delivers all " .. #CORPUS .. " intact (" .. fwd .. " broke)")
+        ok(rev == 0, label .. ": 1.0.2 sender -> 1.0.0 receiver delivers all " .. #CORPUS .. " intact (" .. rev .. " broke)")
+    end
+end)
+
+test("corpus actually exercises both paths", function()
+    -- A corpus that all deflates would pass even with the bug present (deflate output only hits
+    -- 0x7C by chance). Assert the coverage this suite claims, so it cannot silently rot.
+    local raw, comp, multi, pipey, maxFrames = 0, 0, 0, 0, 0
+    for _, mode in ipairs(COMPRESS_MODES) do
+        for _, v in ipairs(CORPUS) do
+            local f = assert(WeirdComm.EncodeFrames(v, 7, FP, mode[1]))
+            if f[1]:sub(7, 7) == "1" then comp = comp + 1 else raw = raw + 1 end
+            if #f > 1 then multi = multi + 1 end
+            if #f > maxFrames then maxFrames = #f end
+            for i = 1, #f do if f[i]:find("\001\003", 1, true) then pipey = pipey + 1 break end end
+        end
+    end
+    ok(raw >= 200, "enough payloads ride uncompressed (" .. raw .. ")")
+    ok(comp >= 200, "enough payloads ride deflated (" .. comp .. ")")
+    ok(multi >= 20, "enough payloads span multiple frames (" .. multi .. ")")
+    ok(maxFrames >= 10, "largest snapshot spans a realistic frame count (" .. maxFrames .. ")")
+    ok(pipey >= 100, "enough payloads carry an escaped pipe, the byte the versions disagree on (" .. pipey .. ")")
+end)
+
+test("wire format is pinned to fixed bytes", function()
+    -- Golden vector: catches a codec change from ANY future LibDeflate, not just the two
+    -- versions vendored here. Changing this byte string is a flag day for the whole raid.
+    local value = { "ROLL", "a|b", 1 }
+    local frames = assert(WeirdComm.EncodeFrames(value, 1, FP, 96))
+    ok(#frames == 1, "single frame")
+    ok(frames[1] == GOLDEN_FRAME, "golden frame bytes (got " .. string.format("%q", frames[1]) .. ")")
+    local okG, gotG = WeirdComm.DecodeFrames(frames)
+    ok(okG and deepeq(gotG, value), "golden frame decodes back")
+end)
+
 print(string.format("\n=== WeirdComm battery: %d passed, %d failed ===", pass, fail))
 if fail > 0 then os.exit(1) end

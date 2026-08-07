@@ -12,8 +12,8 @@
 --     state as one serialized+compressed blob chunked across the fewest frames.
 --
 -- Pipeline (send):  value -> LibSerialize -> (LibDeflate if it shrinks) ->
---                   EncodeForWoWAddonChannel -> chunk across <=255B frames -> token-bucket pace.
--- Pipeline (recv):  reassemble frames by (sender,msgId) -> DecodeForWoWAddonChannel ->
+--                   our own channel codec -> chunk across <=255B frames -> token-bucket pace.
+-- Pipeline (recv):  reassemble frames by (sender,msgId) -> channel codec decode ->
 --                   (DecompressDeflate) -> LibSerialize:Deserialize -> deliver value.
 --
 -- WeirdComm is transport only: it does NOT retry, ack, or detect gaps. Reliability is the
@@ -39,6 +39,20 @@ local LibDeflate = LibStub:GetLibrary("LibDeflate", true)
 local LibSerialize = LibStub:GetLibrary("LibSerialize", true)
 assert(LibDeflate, "WeirdComm-1.0 requires LibDeflate")
 assert(LibSerialize, "WeirdComm-1.0 requires LibSerialize")
+
+-- Our own channel codec instead of LibDeflate:EncodeForWoWAddonChannel.
+-- LibDeflate is a LibStub global, so whichever copy in the user's AddOns folder registers the
+-- highest minor wins for everyone -- and its built-in addon-channel codec is NOT stable across
+-- versions: 1.0.0 reserves "\000\124" (escapes the pipe), 1.0.2 reserves only "\000" (pipe rides
+-- raw). Two raiders on different LibDeflate versions therefore disagree on the wire, and the
+-- 1.0.0 -> 1.0.2 direction does not even fail loudly: the orphaned escape byte is dropped and
+-- LibSerialize happily deserializes the mangled bytes. Building the codec ourselves pins the
+-- format to WeirdComm regardless of which LibDeflate answers. CreateCodec's output is identical
+-- across versions (tests/weirdcomm.lua pins it against both).
+-- Pipe stays reserved: the server does not sanitise addon messages (lang == LANG_ADDON skips the
+-- validity block in ChatHandler.cpp), but escaping it costs ~1/256 of payload and keeps the
+-- bytes safe for anything client-side that treats "|" as an escape.
+local CODEC = LibDeflate:CreateCodec("\000\124", "\001", "")
 
 -- ---------------------------------------------------------------------------
 -- frame budget
@@ -94,7 +108,7 @@ function WeirdComm.EncodeFrames(value, msgId, framePayload, compressMin)
             comp, body = "1", deflated
         end
     end
-    local wire = LibDeflate:EncodeForWoWAddonChannel(body)
+    local wire = CODEC:Encode(body)
 
     local total = #wire
     local nChunks = (total == 0) and 1 or math.ceil(total / framePayload)
@@ -136,7 +150,7 @@ function WeirdComm.DecodeFrames(frames)
     end
     local wire = table.concat(parts, "", 1, cnt)
 
-    local decoded = LibDeflate:DecodeForWoWAddonChannel(wire)
+    local decoded = CODEC:Decode(wire)
     if not decoded then return false, "channel decode failed" end
     local raw = decoded
     if comp == "1" then
