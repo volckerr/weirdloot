@@ -54,9 +54,18 @@ local function shineOnUpdate(shine, elapsed)
     end
 end
 
+-- The angle is ACCOUNT-wide (like Outfitter's), so alts share one spot instead of each starting at
+-- the default. Carries over an angle saved under the older per-character options once.
+local function minimapAngle()
+    local db = addon.db
+    if db.minimapButtonAngle == nil then
+        db.minimapButtonAngle = tonumber(getOptions(addon).minimapButtonAngle)
+    end
+    return tonumber(db.minimapButtonAngle) or 200
+end
+
 local function positionMinimapButton(button)
-    local opt = getOptions(addon)
-    local angle = tonumber(opt.minimapButtonAngle) or 200
+    local angle = minimapAngle()
     local rad = math.rad(angle)
     local radius = 80
     local x = math.cos(rad) * radius
@@ -69,7 +78,10 @@ function addon:BuildMinimapButton()
     if self.ui.minimapButton then return end
     if not Minimap then return end
 
-    local button = CreateFrame("Button", "WeirdLootMinimapButton", Minimap)
+    -- Parented to MinimapBackdrop, not Minimap (Outfitter's choice): minimap addons that collect,
+    -- hide or re-anchor "addon buttons" do it by iterating Minimap's child Buttons, and a button one
+    -- level up is left alone. Anchoring is still to Minimap's center, so it follows a moved/resized map.
+    local button = CreateFrame("Button", "WeirdLootMinimapButton", MinimapBackdrop or Minimap)
     button:SetFrameStrata("MEDIUM")
     button:SetFrameLevel((Minimap:GetFrameLevel() or 0) + 8)
     button:SetWidth(31)
@@ -257,7 +269,7 @@ function addon:BuildMinimapButton()
             local cx, cy = Minimap:GetCenter()
             mx, my = mx / scale, my / scale
             local angle = math.deg(math.atan2(my - cy, mx - cx))
-            getOptions(addon).minimapButtonAngle = angle
+            addon.db.minimapButtonAngle = angle
             positionMinimapButton(s)
         end)
     end)
