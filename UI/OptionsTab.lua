@@ -286,6 +286,11 @@ function addon:BuildOptionsTab()
         getOptions(addon).minimapButtonHidden = not checked
         addon:SetMinimapButtonShown(checked)
     end)
+    -- Undo a Shift+Right-drag detach from here (the button may have been dragged somewhere awkward).
+    local reattachBtn = createButton(panel, "Re-attach to minimap", 140, 22)
+    reattachBtn:SetPoint("LEFT", minimapCB, "RIGHT", 150, 0)
+    reattachBtn:SetScript("OnClick", function() addon:ReattachMinimapButton() end)
+    if addon:IsMinimapButtonDetached() then reattachBtn:Enable() else reattachBtn:Disable() end
 
     -- Roll result tooltip docking: where the result/roller hover tooltips appear relative to the
     -- popup. Defaults to the right of the popup; configurable since that can be wrong for some UIs.
@@ -438,6 +443,7 @@ function addon:BuildOptionsTab()
     panel.blacklistCB = blacklistCB
     panel.blacklistBox = blacklistBox
     panel.minimapCB = minimapCB
+    panel.reattachBtn = reattachBtn
     panel.hideUnusableCB = hideUnusableCB
     panel.anchorDrop = anchorDrop
     panel.bannerMinimalCB = bannerMinimalCB
@@ -452,6 +458,9 @@ function addon:RefreshOptionsTab()
     local inner = self.ui and self.ui.optionsPanel
     if not inner then return end
     local opt = (self.db and self.db.options) or {}
+    if inner.reattachBtn then
+        if self:IsMinimapButtonDetached() then inner.reattachBtn:Enable() else inner.reattachBtn:Disable() end
+    end
     if inner.autoRollCB then
         inner.autoRollCB:SetChecked(self.db.autoRoll == true)
     end

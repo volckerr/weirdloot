@@ -28,6 +28,55 @@ H.test("UI files load and define the expected entry points", function()
     end
 end)
 
+-- Minimap button placement: shape-aware orbit (LibDBIcon math), Shift+Right-drag detach, re-attach.
+local function minimapWorld()
+    local w = uiWorld()
+    w.addon:InitializeUI()
+    local btn = w.env.WeirdLootMinimapButton
+    H.notNil(btn, "minimap button built")
+    local last
+    btn.SetPoint = function(_, point, rel, relPoint, x, y) last = { x = x, y = y } end
+    w.env.Minimap.GetCenter = function() return 500, 500 end
+    btn.GetCenter = function() return 420, 500 end            -- sitting at the left edge (-80, 0)
+    return w, btn, function() return last end
+end
+
+H.test("minimap orbit: round map rides the circle, square map rides the edge", function()
+    local w, btn, at = minimapWorld()
+    w.addon.db.minimapButtonAngle = 30
+    w.env.GetMinimapShape = nil
+    w.addon:ReattachMinimapButton()                            -- repositions from the orbit
+    H.check(math.abs(at().x - 69.28) < 0.1 and math.abs(at().y - 40) < 0.1, "round: 80 * (cos30, sin30)")
+    w.env.GetMinimapShape = function() return "SQUARE" end
+    w.addon:ReattachMinimapButton()
+    H.check(math.abs(at().x - 80) < 0.01 and math.abs(at().y - 51.57) < 0.1, "square: clamped onto the right edge")
+end)
+
+H.test("minimap drag: Shift+Right-drag detaches to a free offset; plain drag re-attaches; Options re-attaches", function()
+    local w, btn, at = minimapWorld()
+    w.env.IsShiftKeyDown = function() return true end
+    w.env.GetCursorPosition = function() return 100, 100 end
+    btn:GetScript("OnDragStart")(btn)
+    w.env.GetCursorPosition = function() return 130, 60 end    -- moved +30, -40
+    btn:GetScript("OnUpdate")(btn)
+    btn:GetScript("OnDragStop")(btn)
+    H.eq(w.addon:IsMinimapButtonDetached(), true, "detached")
+    H.check(math.abs(at().x - (-50)) < 0.01 and math.abs(at().y - (-40)) < 0.01, "free offset = start (-80,0) + delta")
+    H.eq(w.addon.ui.optionsPanel.reattachBtn.__disabled, false, "re-attach button usable")
+
+    w.env.IsShiftKeyDown = function() return false end
+    w.env.GetCursorPosition = function() return 580, 500 end   -- due right of the center
+    btn:GetScript("OnDragStart")(btn)
+    btn:GetScript("OnUpdate")(btn)
+    btn:GetScript("OnDragStop")(btn)
+    H.eq(w.addon:IsMinimapButtonDetached(), false, "plain drag re-attached")
+    H.check(math.abs(w.addon.db.minimapButtonAngle) < 0.01, "angle 0 = right side")
+
+    w.addon.db.minimapButtonX, w.addon.db.minimapButtonY = 5, 5
+    w.addon:ReattachMinimapButton()
+    H.eq(w.addon:IsMinimapButtonDetached(), false, "Options re-attach clears the free offset")
+end)
+
 H.test("InitializeUI builds the window without error", function()
     local w = uiWorld()
     w.addon:InitializeUI()

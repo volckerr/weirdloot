@@ -54,22 +54,86 @@ local function shineOnUpdate(shine, elapsed)
     end
 end
 
-local function positionMinimapButton(button)
-    local opt = getOptions(addon)
-    local angle = tonumber(opt.minimapButtonAngle) or 200
+-- The angle is ACCOUNT-wide (like Outfitter's), so alts share one spot instead of each starting at
+-- the default. Carries over an angle saved under the older per-character options once.
+local function minimapAngle()
+    local db = addon.db
+    if db.minimapButtonAngle == nil then
+        db.minimapButtonAngle = tonumber(getOptions(addon).minimapButtonAngle)
+    end
+    return tonumber(db.minimapButtonAngle) or 200
+end
+
+-- Which quadrants of the minimap are round, per the shape a minimap addon publishes through
+-- GetMinimapShape (LibDBIcon's table; Omen's button slides with this exact math). Quadrants are
+-- numbered 1 = top-right, 2 = top-left, 3 = bottom-right, 4 = bottom-left.
+local MINIMAP_SHAPES = {
+    ["ROUND"] = { true, true, true, true },
+    ["SQUARE"] = { false, false, false, false },
+    ["CORNER-TOPLEFT"] = { true, false, false, false },
+    ["CORNER-TOPRIGHT"] = { false, false, true, false },
+    ["CORNER-BOTTOMLEFT"] = { false, true, false, false },
+    ["CORNER-BOTTOMRIGHT"] = { false, false, false, true },
+    ["SIDE-LEFT"] = { true, true, false, false },
+    ["SIDE-RIGHT"] = { false, false, true, true },
+    ["SIDE-TOP"] = { true, false, true, false },
+    ["SIDE-BOTTOM"] = { false, true, false, true },
+    ["TRICORNER-TOPLEFT"] = { true, true, true, false },
+    ["TRICORNER-TOPRIGHT"] = { true, false, true, true },
+    ["TRICORNER-BOTTOMLEFT"] = { true, true, false, true },
+    ["TRICORNER-BOTTOMRIGHT"] = { false, true, true, true },
+}
+local ORBIT_RADIUS = 80
+local ORBIT_DIAGONAL = 103.13708498985   -- sqrt(2 * 80^2) - 10: the square's edge, clamped below
+
+-- Orbit offset for an angle: on the circle in a round quadrant, clamped onto the square's edge in a
+-- square one, so the button rides the rim of whatever shape the minimap has.
+local function orbitOffset(angle)
     local rad = math.rad(angle)
-    local radius = 80
-    local x = math.cos(rad) * radius
-    local y = math.sin(rad) * radius
+    local x, y, q = math.cos(rad), math.sin(rad), 1
+    if x < 0 then q = q + 1 end
+    if y > 0 then q = q + 2 end
+    local shape = (GetMinimapShape and GetMinimapShape()) or "ROUND"
+    local quads = MINIMAP_SHAPES[shape] or MINIMAP_SHAPES.ROUND
+    if quads[q] then
+        return x * ORBIT_RADIUS, y * ORBIT_RADIUS
+    end
+    return math.max(-ORBIT_RADIUS, math.min(x * ORBIT_DIAGONAL, ORBIT_RADIUS)),
+           math.max(-ORBIT_RADIUS, math.min(y * ORBIT_DIAGONAL, ORBIT_RADIUS))
+end
+
+-- Detached (Shift+Right-drag, like Outfitter's modifier drag): a free offset from the minimap's
+-- center replaces the orbit until re-attached (plain drag, or the Options button).
+local function positionMinimapButton(button)
+    local db = addon.db
+    local x, y
+    if db.minimapButtonX and db.minimapButtonY then
+        x, y = db.minimapButtonX, db.minimapButtonY
+    else
+        x, y = orbitOffset(minimapAngle())
+    end
     button:ClearAllPoints()
     button:SetPoint("CENTER", Minimap, "CENTER", x, y)
+end
+
+function addon:IsMinimapButtonDetached()
+    return self.db.minimapButtonX ~= nil
+end
+
+function addon:ReattachMinimapButton()
+    self.db.minimapButtonX, self.db.minimapButtonY = nil, nil
+    if self.ui and self.ui.minimapButton then positionMinimapButton(self.ui.minimapButton) end
+    if self.RefreshOptionsTab then self:RefreshOptionsTab() end
 end
 
 function addon:BuildMinimapButton()
     if self.ui.minimapButton then return end
     if not Minimap then return end
 
-    local button = CreateFrame("Button", "WeirdLootMinimapButton", Minimap)
+    -- Parented to MinimapBackdrop, not Minimap (Outfitter's choice): minimap addons that collect,
+    -- hide or re-anchor "addon buttons" do it by iterating Minimap's child Buttons, and a button one
+    -- level up is left alone. Anchoring is still to Minimap's center, so it follows a moved/resized map.
+    local button = CreateFrame("Button", "WeirdLootMinimapButton", MinimapBackdrop or Minimap)
     button:SetFrameStrata("MEDIUM")
     button:SetFrameLevel((Minimap:GetFrameLevel() or 0) + 8)
     button:SetWidth(31)
@@ -232,7 +296,7 @@ function addon:BuildMinimapButton()
             GameTooltip:AddLine("Press again to accept the trade.", 0.6, 1, 0.6)
         else
             GameTooltip:AddLine("Click to toggle the main window.", 1, 1, 1)
-            GameTooltip:AddLine("Right-drag to reposition.", 0.8, 0.8, 0.8)
+            GameTooltip:AddLine("Right-drag to reposition; Shift+Right-drag to detach it.", 0.8, 0.8, 0.8)
         end
 
         if owed and #owed > 0 then
@@ -251,19 +315,32 @@ function addon:BuildMinimapButton()
 
     button:SetScript("OnDragStart", function(selfBtn)
         selfBtn.isDragging = true
+        local scale = Minimap:GetEffectiveScale()
+        -- Shift held at drag start = DETACH: the button follows the cursor by delta from where it
+        -- was, anywhere on screen. A plain drag always returns it to the orbit.
+        local free = IsShiftKeyDown and IsShiftKeyDown()
+        local startMx, startMy = GetCursorPosition()
+        local bx, by = selfBtn:GetCenter()
+        local cx, cy = Minimap:GetCenter()
+        local startX, startY = (bx or 0) - (cx or 0), (by or 0) - (cy or 0)
         selfBtn:SetScript("OnUpdate", function(s)
             local mx, my = GetCursorPosition()
-            local scale = Minimap:GetEffectiveScale()
-            local cx, cy = Minimap:GetCenter()
-            mx, my = mx / scale, my / scale
-            local angle = math.deg(math.atan2(my - cy, mx - cx))
-            getOptions(addon).minimapButtonAngle = angle
+            local db = addon.db
+            if free then
+                db.minimapButtonX = startX + (mx - startMx) / scale
+                db.minimapButtonY = startY + (my - startMy) / scale
+            else
+                local ccx, ccy = Minimap:GetCenter()
+                db.minimapButtonX, db.minimapButtonY = nil, nil
+                db.minimapButtonAngle = math.deg(math.atan2(my / scale - ccy, mx / scale - ccx))
+            end
             positionMinimapButton(s)
         end)
     end)
     button:SetScript("OnDragStop", function(selfBtn)
         selfBtn.isDragging = false
         selfBtn:SetScript("OnUpdate", nil)
+        if addon.RefreshOptionsTab then addon:RefreshOptionsTab() end   -- re-attach button enable state
     end)
 
     self.ui.minimapButton = button
